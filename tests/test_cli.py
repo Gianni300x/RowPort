@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import psycopg
 
-from scripts.cli import InputError, database_url, import_rows, main, read_csv, show_progress, validate_headers, write_report
+from scripts.cli import InputError, database_url, import_rows, main, map_headers, read_csv, show_progress, validate_headers, write_report
 
 
 class Connection:
@@ -35,6 +35,17 @@ class Connection:
 
 
 class RowPortTests(unittest.TestCase):
+    def test_column_mappings_and_collisions(self):
+        self.assertEqual(map_headers(["street", "price", "bedrooms"],
+                                     ["street=address", "bedrooms=rooms"]),
+                         ["address", "price", "rooms"])
+        for mappings, message in [(["street"], "form"), (["street="], "form"),
+                                  (["missing=address"], "not found"),
+                                  (["street=address", "street=rooms"], "Duplicate mapping"),
+                                  (["street=price"], "same table column")]:
+            with self.subTest(mappings=mappings), self.assertRaisesRegex(InputError, message):
+                map_headers(["street", "price", "bedrooms"], mappings)
+
     def test_database_url_from_file_and_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"

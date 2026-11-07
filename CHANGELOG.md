@@ -6,6 +6,7 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
+- Map CSV headers to different PostgreSQL column names with repeatable `--map` options.
 - Validate CSV headers against a PostgreSQL table without importing rows.
 - Show import progress every 10,000 rows, including pending and rejected counts.
 - Run a 200,000-row demo with Docker Compose and save a rejection report.

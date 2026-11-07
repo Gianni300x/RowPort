@@ -71,6 +71,19 @@ on errors. It does not examine row data or check types and constraints, and it
 does not insert anything. Use `--schema` or `--dsn` when needed; the connection
 configuration follows the same precedence as the import command.
 
+When CSV headers differ from the table's column names, use `--map` for each
+equivalence. Names are case-sensitive and must match exactly; quote arguments
+containing spaces for your shell. Unmapped columns keep their original names.
+The same mappings can be used for validation and import:
+
+```sh
+rowport validate properties.csv --table properties --map street=address --map bedrooms=rooms
+rowport properties.csv --table properties --map street=address --map bedrooms=rooms --rejects rejects.csv
+```
+
+Mappings must reference existing CSV columns and distinct insertable table
+columns. Rejected rows retain their original CSV values and column order.
+
 The input must be UTF-8 CSV with unique headers matching insertable table columns. Columns marked `NOT NULL` without a default or identity are required; unknown columns prevent the import. Empty values are sent as empty strings, not `NULL`.
 
 PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the CSV record number (header = 1), the original row encoded as CSV, and the rejection reason. It is written even when there are no rejected rows and overwrites the selected output file. If writing the report fails after commit, the CLI reports that rows were already saved.

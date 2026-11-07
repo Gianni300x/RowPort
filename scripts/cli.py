@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -75,6 +76,24 @@ def validate_headers(headers, columns):
         raise InputError("; ".join(errors))
 
 
+def map_headers(headers, mappings):
+    mapping = {}
+    for item in mappings:
+        source, sep, target = item.partition("=")
+        if not sep or not source.strip() or not target.strip():
+            raise InputError("Each --map must have the form CSV_COLUMN=TABLE_COLUMN.")
+        if source in mapping:
+            raise InputError(f"Duplicate mapping for CSV column: {source}")
+        if source not in headers:
+            raise InputError(f"Mapped CSV column not found: {source}")
+        mapping[source] = target
+    result = [mapping.get(header, header) for header in headers]
+    duplicates = sorted(name for name, count in Counter(result).items() if count > 1)
+    if duplicates:
+        raise InputError("Multiple CSV columns map to the same table column: " + ", ".join(duplicates))
+    return result
+
+
 def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000):
     statement = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
         sql.Identifier(schema), sql.Identifier(table),
@@ -129,20 +148,24 @@ def validation_main(argv):
     parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
     parser.add_argument("--table", required=True, help="Table name")
     parser.add_argument("--schema", default="public", help="Schema (default: public)")
+    parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
     args = parser.parse_args(argv)
     try:
         dsn = args.dsn or database_url()
         if not dsn:
             parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
         with read_csv(args.csv) as (headers, _):
+            mapped = map_headers(headers, args.map)
             with psycopg.connect(dsn) as conn:
                 conn.read_only = True
                 columns = table_columns(conn, args.schema, args.table)
             print("CSV columns: " + ", ".join(headers))
+            if args.map:
+                print("Mapped columns: " + ", ".join(mapped))
             if columns:
                 print("Table insertable columns: " + ", ".join(name for name, _ in columns))
                 print("Required columns: " + (", ".join(name for name, required in columns if required) or "(none)"))
-            validate_headers(headers, columns)
+            validate_headers(mapped, columns)
     except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -159,6 +182,7 @@ def main(argv=None):
     parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
     parser.add_argument("--table", required=True, help="Table name")
     parser.add_argument("--schema", default="public", help="Schema (default: public)")
+    parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
     parser.add_argument("--rejects", type=Path, required=True, help="Rejected rows CSV file")
     parser.epilog = "To check headers without importing: rowport validate CSV --table TABLE"
     args = parser.parse_args(argv)
@@ -173,6 +197,7 @@ def main(argv=None):
         parser.error("The rejection report must differ from the input CSV.")
     try:
         with read_csv(args.csv) as (headers, rows), tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as report:
+            headers = map_headers(headers, args.map)
             with psycopg.connect(dsn) as conn:
                 with conn.transaction():
                     validate_headers(headers, table_columns(conn, args.schema, args.table))

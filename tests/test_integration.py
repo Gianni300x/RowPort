@@ -84,6 +84,36 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("rooms", result.stderr)
         self.assertEqual(self.count(), 2)
 
+    def test_mapping_validates_and_imports_without_losing_rejected_values(self):
+        source = Path(self.directory.name) / "mapped.csv"
+        source.write_text('street,price,bedrooms\n"First, Avenue",100,2\nBad,invalid,3\n', encoding="utf-8")
+        report = Path(self.directory.name) / "mapped-rejects.csv"
+        common = [str(source), "--dsn", DSN, "--schema", self.schema, "--table", "properties",
+                  "--map", "street=address", "--map", "bedrooms=rooms"]
+        validation = subprocess.run([sys.executable, "-m", "scripts.cli", "validate", *common],
+                                    cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(validation.returncode, 0, validation.stderr)
+        self.assertIn("Mapped columns: address, price, rooms", validation.stdout)
+        self.assertEqual(self.count(), 0)
+        result = subprocess.run([sys.executable, "-m", "scripts.cli", *common, "--rejects", str(report)],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with psycopg.connect(DSN) as conn:
+            row = conn.execute(sql.SQL("SELECT address, price, rooms FROM {}.properties").format(sql.Identifier(self.schema))).fetchone()
+        self.assertEqual((row[0], int(row[1]), row[2]), ("First, Avenue", 100, 2))
+        with report.open(encoding="utf-8", newline="") as f:
+            rejected = list(csv.DictReader(f))
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["Bad", "invalid", "3"])
+
+        for mapping, message in [("street=missing", "Unknown columns"),
+                                 ("street=price", "same table column")]:
+            bad = subprocess.run([sys.executable, "-m", "scripts.cli", str(source), "--dsn", DSN,
+                                  "--schema", self.schema, "--table", "properties", "--map", mapping,
+                                  "--rejects", str(report)], cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertIn(message, bad.stderr)
+            self.assertEqual(self.count(), 1)
     def test_database_failure_rolls_back_prior_insert(self):
         with psycopg.connect(DSN) as conn:
             conn.execute(sql.SQL("CREATE FUNCTION {}.fail_import() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.address = 'FAIL' THEN RAISE EXCEPTION 'simulated failure' USING ERRCODE = '58000'; END IF; RETURN NEW; END $$").format(sql.Identifier(self.schema)))
