@@ -27,7 +27,7 @@ class Connection:
 
     def execute(self, statement, row):
         if row[0] == "invalid":
-            raise psycopg.DataError("tipo inválido")
+            raise psycopg.DataError("invalid type")
         if self.failure:
             raise self.failure
         self.executed.append(row)
@@ -35,12 +35,12 @@ class Connection:
 
 class RowPortTests(unittest.TestCase):
     def test_header_validation(self):
-        columns = [("id", False), ("direccion", True)]
-        validate_headers(["direccion"], columns)
+        columns = [("id", False), ("address", True)]
+        validate_headers(["address"], columns)
         with self.assertRaisesRegex(InputError, "Missing"):
             validate_headers(["id"], columns)
         with self.assertRaisesRegex(InputError, "Unknown"):
-            validate_headers(["direccion", "otra"], columns)
+            validate_headers(["address", "otra"], columns)
 
     def test_read_rejects_duplicate_headers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -51,7 +51,7 @@ class RowPortTests(unittest.TestCase):
 
     def test_rows_and_report_keep_invalid_and_irregular_values(self):
         conn = Connection()
-        saved, rejected = import_rows(conn, "public", "inmuebles", ["a", "b"],
+        saved, rejected = import_rows(conn, "public", "properties", ["a", "b"],
                                       [["ok", "1"], ["invalid", "2"], ["extra", "3", "4"]])
         self.assertEqual(saved, 1)
         self.assertEqual([item[0] for item in rejected], [3, 4])
@@ -63,7 +63,7 @@ class RowPortTests(unittest.TestCase):
             self.assertEqual(list(csv.reader([records[2][1]]))[0], ["extra", "3", "4"])
 
     def test_database_failure_is_not_treated_as_row_rejection(self):
-        conn = Connection(psycopg.OperationalError("conexión perdida"))
+        conn = Connection(psycopg.OperationalError("connection lost"))
         with self.assertRaises(psycopg.OperationalError):
             import_rows(conn, "public", "t", ["a"], [["ok"]])
 
@@ -74,7 +74,7 @@ class RowPortTests(unittest.TestCase):
             conn = Connection()
             with patch("scripts.cli.psycopg.connect", return_value=conn), \
                  patch("scripts.cli.table_columns", return_value=[("a", True)]), \
-                 patch("scripts.cli.write_report", side_effect=OSError("sin espacio")):
+                 patch("scripts.cli.write_report", side_effect=OSError("no space")):
                 self.assertEqual(main([str(source), "--dsn", "test", "--table", "t",
                                        "--rejects", str(Path(directory) / "out.csv")]), 1)
 
