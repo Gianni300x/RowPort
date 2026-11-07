@@ -150,6 +150,8 @@ activemq-data/
 *.sage.py
 
 # Environments
+/reports/
+/rejects-200000.csv
 .env
 .envrc
 .venv

@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: rowport
+      POSTGRES_PASSWORD: rowport-demo
+      POSTGRES_DB: rowport
+    tmpfs:
+      - /var/lib/postgresql
+    volumes:
+      - ./examples/properties.sql:/docker-entrypoint-initdb.d/properties.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U rowport -d rowport && psql -U rowport -d rowport -tAc 'SELECT 1 FROM public.properties LIMIT 1' >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  demo:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://rowport:rowport-demo@db:5432/rowport
+    volumes:
+      - ./examples:/data:ro
+      - ./reports:/reports
+    command: ["/data/properties-200000.csv", "--table", "properties", "--rejects", "/reports/rejects.csv"]

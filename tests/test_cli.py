@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import psycopg
 
-from scripts.cli import InputError, import_rows, main, read_csv, validate_headers, write_report
+from scripts.cli import InputError, database_url, import_rows, main, read_csv, validate_headers, write_report
 
 
 class Connection:
@@ -34,6 +34,26 @@ class Connection:
 
 
 class RowPortTests(unittest.TestCase):
+    def test_database_url_from_file_and_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            path.write_text('# Configuration\nDATABASE_URL="postgresql://file/db"\n', encoding="utf-8")
+            with patch.dict("os.environ", {}, clear=True):
+                self.assertEqual(database_url(path), "postgresql://file/db")
+            with patch.dict("os.environ", {"DATABASE_URL": "postgresql://env/db"}):
+                self.assertEqual(database_url(path), "postgresql://env/db")
+
+    def test_explicit_dsn_takes_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.csv"
+            source.write_text("a\nok\n", encoding="utf-8")
+            with patch("scripts.cli.psycopg.connect", return_value=Connection()) as connect, \
+                 patch("scripts.cli.table_columns", return_value=[("a", True)]), \
+                 patch.dict("os.environ", {"DATABASE_URL": "postgresql://env/db"}):
+                self.assertEqual(main([str(source), "--dsn", "explicit", "--table", "t",
+                                       "--rejects", str(Path(directory) / "out.csv")]), 0)
+                connect.assert_called_once_with("explicit")
+
     def test_header_validation(self):
         columns = [("id", False), ("address", True)]
         validate_headers(["address"], columns)

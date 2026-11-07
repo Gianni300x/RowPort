@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 import sys
 from pathlib import Path
 
@@ -9,6 +10,22 @@ from psycopg import sql
 
 class InputError(Exception):
     """The CSV or target table cannot be used for an import."""
+
+
+def database_url(path=Path(".env")):
+    """Read the connection from the environment or the current directory's .env."""
+    if os.environ.get("DATABASE_URL"):
+        return os.environ["DATABASE_URL"]
+    if not path.exists():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "DATABASE_URL":
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            return value or None
+    return None
 
 
 def read_csv(path):
@@ -89,16 +106,23 @@ def write_report(path, headers, rejected):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Import a CSV into an existing PostgreSQL table.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
-    parser.add_argument("--dsn", required=True, help="PostgreSQL connection string")
+    parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
     parser.add_argument("--table", required=True, help="Table name")
     parser.add_argument("--schema", default="public", help="Schema (default: public)")
     parser.add_argument("--rejects", type=Path, required=True, help="Rejected rows CSV file")
     args = parser.parse_args(argv)
+    try:
+        dsn = args.dsn or database_url()
+    except (OSError, UnicodeError) as exc:
+        print(f"Error reading .env: {exc}", file=sys.stderr)
+        return 1
+    if not dsn:
+        parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
     if args.csv.resolve() == args.rejects.resolve():
         parser.error("The rejection report must differ from the input CSV.")
     try:
         headers, rows = read_csv(args.csv)
-        with psycopg.connect(args.dsn) as conn:
+        with psycopg.connect(dsn) as conn:
             with conn.transaction():
                 validate_headers(headers, table_columns(conn, args.schema, args.table))
                 saved, rejected = import_rows(conn, args.schema, args.table, headers, rows)
