@@ -4,6 +4,10 @@ RowPort is a Python CLI that imports CSV files into an existing PostgreSQL table
 
 ## Quick demo with Docker
 
+![Accelerated recording of a RowPort import](docs/rowport-demo.gif)
+
+The demo above shows real output from a Docker run, replayed at an accelerated pace.
+
 Install and start Docker with the Compose plugin, then clone this repository and run:
 
 ```sh
