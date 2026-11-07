@@ -95,6 +95,12 @@ To skip violations reported on the target table instead, use:
 rowport data.csv --table properties --rejects rejects.csv --skip-duplicates
 ```
 
+![Demonstration of importing with duplicate rows skipped](docs/skip-duplicates.gif)
+
+This replay shows actual output from a test using a temporary PostgreSQL schema:
+one new row is saved, two duplicate rows are skipped, and an invalid row is
+written to the rejection report.
+
 Skipped rows are counted separately and do not appear in the rejection report.
 This relies on unique constraints or unique indexes in PostgreSQL: without one,
 RowPort cannot identify duplicates. A conflict means a unique key already

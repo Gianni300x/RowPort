@@ -6,6 +6,7 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
+- Add a demonstration of the `--skip-duplicates` option to the README.
 - Optionally skip target-table unique constraint violations and count them separately.
 - Map CSV headers to different PostgreSQL column names with repeatable `--map` options.
 - Validate CSV headers against a PostgreSQL table without importing rows.
