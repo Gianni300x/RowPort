@@ -7,7 +7,7 @@ name = "rowport"
 version = "0.1.0"
 description = "Import CSV rows into an existing PostgreSQL table"
 license = {file = "LICENSE"}
-classifiers = ["License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"]
+classifiers = ["License :: OSI Approved :: MIT License"]
 requires-python = ">=3.10"
 dependencies = ["psycopg[binary]>=3.1,<4"]
 

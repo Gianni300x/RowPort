@@ -101,4 +101,5 @@ ROWPORT_TEST_DSN="$DATABASE_URL" python -m unittest discover -s tests -v
 
 ## License
 
-RowPort is licensed under the [GNU General Public License, version 3 or later](LICENSE).
+Copyright (c) 2026 Gianni Luigi Messina. RowPort is licensed under the
+[MIT License](LICENSE).

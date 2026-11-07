@@ -6,7 +6,6 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
-- License RowPort under the GNU General Public License, version 3 or later.
 - Validate CSV headers against a PostgreSQL table without importing rows.
 - Show import progress every 10,000 rows, including pending and rejected counts.
 - Run a 200,000-row demo with Docker Compose and save a rejection report.
@@ -16,4 +15,5 @@ All notable changes to RowPort are documented in this file.
 
 ### Changed
 
+- License RowPort under the MIT License instead of GPL-3.0-or-later.
 - Read CSV rows incrementally and stage rejections on disk to limit memory use.
