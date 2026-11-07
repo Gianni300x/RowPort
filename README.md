@@ -55,6 +55,18 @@ The connection can also be supplied as an environment variable or with `--dsn`.
 The order of precedence is `--dsn`, the `DATABASE_URL` environment variable,
 then `DATABASE_URL` in `.env`. The table must already exist. The default schema is `public`; use `--schema` to select another. See `rowport --help` for all options.
 
+To check headers before importing, use:
+
+```sh
+rowport validate examples/properties.csv --table properties
+```
+
+This displays the CSV headers and the table's insertable and required columns.
+It reports missing required or unknown columns and exits with a nonzero status
+on errors. It does not examine row data or check types and constraints, and it
+does not insert anything. Use `--schema` or `--dsn` when needed; the connection
+configuration follows the same precedence as the import command.
+
 The input must be UTF-8 CSV with unique headers matching insertable table columns. Columns marked `NOT NULL` without a default or identity are required; unknown columns prevent the import. Empty values are sent as empty strings, not `NULL`.
 
 PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the CSV record number (header = 1), the original row encoded as CSV, and the rejection reason. It is written even when there are no rejected rows and overwrites the selected output file. If writing the report fails after commit, the CLI reports that rows were already saved.

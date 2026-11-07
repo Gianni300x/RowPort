@@ -40,6 +40,34 @@ class IntegrationTests(unittest.TestCase):
         with psycopg.connect(DSN) as conn:
             return conn.execute(sql.SQL("SELECT count(*) FROM {}.properties").format(sql.Identifier(self.schema))).fetchone()[0]
 
+    def test_validation_checks_headers_without_importing_rows(self):
+        def validate(source):
+            return subprocess.run([sys.executable, "-m", "scripts.cli", "validate", str(source),
+                                   "--dsn", DSN, "--schema", self.schema, "--table", "properties"],
+                                  cwd=ROOT, capture_output=True, text=True)
+
+        result = validate(ROOT / "examples/properties.csv")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CSV columns: address, price, rooms", result.stdout)
+        self.assertIn("Required columns: address, price, rooms", result.stdout)
+        self.assertIn("No rows were checked or imported", result.stdout)
+        self.assertEqual(self.count(), 0)
+        self.assertFalse((Path(self.directory.name) / "rejects.csv").exists())
+
+        source = Path(self.directory.name) / "bad_headers.csv"
+        source.write_text("address,price,extra\nExample,100,x\n", encoding="utf-8")
+        result = validate(source)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown columns: extra", result.stderr)
+        self.assertIn("Missing required columns: rooms", result.stderr)
+        self.assertEqual(self.count(), 0)
+
+        source.write_text("address,address\nExample,Example\n", encoding="utf-8")
+        result = validate(source)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate", result.stderr)
+        self.assertEqual(self.count(), 0)
+
     def test_example_and_missing_column(self):
         result, report = self.run_cli(ROOT / "examples/properties.csv")
         self.assertEqual(result.returncode, 0, result.stderr)

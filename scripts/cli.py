@@ -66,10 +66,13 @@ def validate_headers(headers, columns):
     known = {name for name, _ in columns}
     unknown = set(headers) - known
     missing = {name for name, required in columns if required} - set(headers)
+    errors = []
     if unknown:
-        raise InputError("Unknown columns: " + ", ".join(sorted(unknown)))
+        errors.append("Unknown columns: " + ", ".join(sorted(unknown)))
     if missing:
-        raise InputError("Missing required columns: " + ", ".join(sorted(missing)))
+        errors.append("Missing required columns: " + ", ".join(sorted(missing)))
+    if errors:
+        raise InputError("; ".join(errors))
 
 
 def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000):
@@ -120,13 +123,44 @@ def write_report(path, report):
         shutil.copyfileobj(report, target)
 
 
+def validation_main(argv):
+    parser = argparse.ArgumentParser(prog="rowport validate", description="Check CSV headers against an existing PostgreSQL table without importing rows.")
+    parser.add_argument("csv", type=Path, help="Input CSV file")
+    parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
+    parser.add_argument("--table", required=True, help="Table name")
+    parser.add_argument("--schema", default="public", help="Schema (default: public)")
+    args = parser.parse_args(argv)
+    try:
+        dsn = args.dsn or database_url()
+        if not dsn:
+            parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
+        with read_csv(args.csv) as (headers, _):
+            with psycopg.connect(dsn) as conn:
+                conn.read_only = True
+                columns = table_columns(conn, args.schema, args.table)
+            print("CSV columns: " + ", ".join(headers))
+            if columns:
+                print("Table insertable columns: " + ", ".join(name for name, _ in columns))
+                print("Required columns: " + (", ".join(name for name, required in columns if required) or "(none)"))
+            validate_headers(headers, columns)
+    except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print("Headers are compatible. No rows were checked or imported.")
+    return 0
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "validate" and (len(argv) == 1 or argv[1] == "--help" or not argv[1].startswith("-")):
+        return validation_main(argv[1:])
     parser = argparse.ArgumentParser(description="Import a CSV into an existing PostgreSQL table.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
     parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
     parser.add_argument("--table", required=True, help="Table name")
     parser.add_argument("--schema", default="public", help="Schema (default: public)")
     parser.add_argument("--rejects", type=Path, required=True, help="Rejected rows CSV file")
+    parser.epilog = "To check headers without importing: rowport validate CSV --table TABLE"
     args = parser.parse_args(argv)
     try:
         dsn = args.dsn or database_url()
