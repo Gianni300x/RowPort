@@ -94,7 +94,7 @@ def map_headers(headers, mappings):
     return result
 
 
-def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000):
+def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000, skip_duplicates=False):
     statement = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
         sql.Identifier(schema), sql.Identifier(table),
         sql.SQL(", ").join(map(sql.Identifier, headers)),
@@ -102,6 +102,7 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
     )
     rejected = 0
     saved = 0
+    skipped = 0
     writer = csv.writer(report)
     writer.writerow(["row_number", "csv_row", "reason"])
     for number, row in enumerate(rows, start=2):
@@ -114,6 +115,12 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
                 # A savepoint isolates invalid rows; the outer transaction remains atomic.
                 with conn.transaction():
                     conn.execute(statement, row)
+            except psycopg.errors.UniqueViolation as exc:
+                if skip_duplicates and exc.diag.schema_name == schema and exc.diag.table_name == table:
+                    skipped += 1
+                else:
+                    write_rejection(writer, number, row, exc.diag.message_primary or str(exc))
+                    rejected += 1
             except (psycopg.DataError, psycopg.IntegrityError) as exc:
                 write_rejection(writer, number, row, exc.diag.message_primary or str(exc))
                 rejected += 1
@@ -121,13 +128,16 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
                 saved += 1
         processed = number - 1
         if progress and processed % progress_interval == 0:
-            progress(processed, saved, rejected)
-    return saved, rejected
+            progress(processed, saved, rejected, skipped)
+    return saved, rejected, skipped
 
 
-def show_progress(processed, saved, rejected):
-    print(f"Progress: {processed} processed; {saved} saved pending commit; "
-          f"{rejected} rejected.", flush=True)
+def show_progress(processed, saved, rejected, skipped=0):
+    message = (f"Progress: {processed} processed; {saved} saved pending commit; "
+               f"{rejected} rejected.")
+    if skipped:
+        message += f" {skipped} duplicates skipped."
+    print(message, flush=True)
 
 
 def write_rejection(writer, number, row, reason):
@@ -184,6 +194,7 @@ def main(argv=None):
     parser.add_argument("--schema", default="public", help="Schema (default: public)")
     parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
     parser.add_argument("--rejects", type=Path, required=True, help="Rejected rows CSV file")
+    parser.add_argument("--skip-duplicates", action="store_true", help="Skip unique constraint violations on the target table")
     parser.epilog = "To check headers without importing: rowport validate CSV --table TABLE"
     args = parser.parse_args(argv)
     try:
@@ -201,8 +212,8 @@ def main(argv=None):
             with psycopg.connect(dsn) as conn:
                 with conn.transaction():
                     validate_headers(headers, table_columns(conn, args.schema, args.table))
-                    saved, rejected = import_rows(conn, args.schema, args.table, headers, rows, report,
-                                                  progress=show_progress)
+                    saved, rejected, skipped = import_rows(conn, args.schema, args.table, headers, rows, report,
+                                                           progress=show_progress, skip_duplicates=args.skip_duplicates)
             try:
                 write_report(args.rejects, report)
             except OSError as exc:
@@ -211,7 +222,10 @@ def main(argv=None):
     except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(f"Rows saved: {saved}. Rows rejected: {rejected}. Report: {args.rejects}")
+    summary = f"Rows saved: {saved}. Rows rejected: {rejected}."
+    if args.skip_duplicates:
+        summary += f" Duplicates skipped: {skipped}."
+    print(f"{summary} Report: {args.rejects}")
     return 0
 
 

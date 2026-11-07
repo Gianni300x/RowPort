@@ -88,6 +88,21 @@ The input must be UTF-8 CSV with unique headers matching insertable table column
 
 PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the CSV record number (header = 1), the original row encoded as CSV, and the rejection reason. It is written even when there are no rejected rows and overwrites the selected output file. If writing the report fails after commit, the CLI reports that rows were already saved.
 
+By default, unique constraint violations are rejected like other invalid rows.
+To skip violations reported on the target table instead, use:
+
+```sh
+rowport data.csv --table properties --rejects rejects.csv --skip-duplicates
+```
+
+Skipped rows are counted separately and do not appear in the rejection report.
+This relies on unique constraints or unique indexes in PostgreSQL: without one,
+RowPort cannot identify duplicates. A conflict means a unique key already
+exists; it does not guarantee that the rest of the row is identical. Violations
+reported for another table, including a partition or a table affected by a
+trigger, remain rejections. Deferred constraints may fail at commit and roll
+back the import instead of being skipped.
+
 Rows are read one at a time, and rejected rows are staged in a temporary file on
 disk until the database transaction succeeds. Memory use therefore does not grow
 with the number of rows, although disk space is needed for the rejection report.

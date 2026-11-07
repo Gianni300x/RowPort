@@ -114,6 +114,32 @@ class IntegrationTests(unittest.TestCase):
             self.assertNotEqual(bad.returncode, 0)
             self.assertIn(message, bad.stderr)
             self.assertEqual(self.count(), 1)
+
+    def test_duplicate_policy_and_other_errors(self):
+        with psycopg.connect(DSN) as conn:
+            conn.execute(sql.SQL("ALTER TABLE {}.properties ADD UNIQUE (address)").format(sql.Identifier(self.schema)))
+            conn.execute(sql.SQL("INSERT INTO {}.properties (address, price, rooms) VALUES ('Existing', 100, 1)").format(sql.Identifier(self.schema)))
+        source = Path(self.directory.name) / "duplicates.csv"
+        source.write_text("address,price,rooms\nExisting,200,2\nNew,300,3\nNew,400,4\nInvalid,bad,1\n", encoding="utf-8")
+        report = Path(self.directory.name) / "duplicates-report.csv"
+        common = [sys.executable, "-m", "scripts.cli", str(source), "--dsn", DSN,
+                  "--schema", self.schema, "--table", "properties", "--rejects", str(report)]
+        result = subprocess.run([*common, "--skip-duplicates"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Rows saved: 1. Rows rejected: 1. Duplicates skipped: 2.", result.stdout)
+        self.assertEqual(self.count(), 2)
+        with report.open(encoding="utf-8", newline="") as f:
+            rejected = list(csv.DictReader(f))
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("Invalid,bad,1", rejected[0]["csv_row"])
+
+        result = subprocess.run(common, cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Rows saved: 0. Rows rejected: 4.", result.stdout)
+        self.assertEqual(self.count(), 2)
+        with report.open(encoding="utf-8", newline="") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 4)
+
     def test_database_failure_rolls_back_prior_insert(self):
         with psycopg.connect(DSN) as conn:
             conn.execute(sql.SQL("CREATE FUNCTION {}.fail_import() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.address = 'FAIL' THEN RAISE EXCEPTION 'simulated failure' USING ERRCODE = '58000'; END IF; RETURN NEW; END $$").format(sql.Identifier(self.schema)))

@@ -95,10 +95,11 @@ class RowPortTests(unittest.TestCase):
     def test_rows_and_report_keep_invalid_and_irregular_values(self):
         conn = Connection()
         report = io.StringIO(newline="")
-        saved, rejected = import_rows(conn, "public", "properties", ["a", "b"],
+        saved, rejected, skipped = import_rows(conn, "public", "properties", ["a", "b"],
                                       iter([["ok", "1"], ["invalid", "2"], ["extra", "3", "4"]]), report)
         self.assertEqual(saved, 1)
         self.assertEqual(rejected, 2)
+        self.assertEqual(skipped, 0)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rejected.csv"
             write_report(path, report)
@@ -114,12 +115,12 @@ class RowPortTests(unittest.TestCase):
 
     def test_progress_counts_all_completed_rows_at_interval(self):
         events = []
-        saved, rejected = import_rows(Connection(), "public", "t", ["a"],
+        saved, rejected, skipped = import_rows(Connection(), "public", "t", ["a"],
                                       iter([["ok"], ["invalid"], ["extra", "field"], ["ok"]]),
                                       io.StringIO(newline=""),
                                       progress=lambda *counts: events.append(counts), progress_interval=2)
-        self.assertEqual(events, [(2, 1, 1), (4, 2, 2)])
-        self.assertEqual((saved, rejected), (2, 2))
+        self.assertEqual(events, [(2, 1, 1, 0), (4, 2, 2, 0)])
+        self.assertEqual((saved, rejected, skipped), (2, 2, 0))
 
     def test_failure_after_progress_does_not_count_failed_row(self):
         class FailingConnection(Connection):
@@ -133,7 +134,7 @@ class RowPortTests(unittest.TestCase):
             import_rows(FailingConnection(), "public", "t", ["a"],
                         iter([["ok"], ["invalid"], ["fail"]]), io.StringIO(newline=""),
                         progress=lambda *counts: events.append(counts), progress_interval=2)
-        self.assertEqual(events, [(2, 1, 1)])
+        self.assertEqual(events, [(2, 1, 1, 0)])
 
     def test_progress_is_flushed_as_independent_lines(self):
         class Output(io.StringIO):
