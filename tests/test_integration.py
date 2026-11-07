@@ -66,3 +66,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("simulated failure", result.stderr)
         self.assertEqual(self.count(), 0)
+
+    def test_malformed_csv_after_valid_row_rolls_back(self):
+        source = Path(self.directory.name) / "malformed.csv"
+        source.write_text('address,price,rooms\nValid,100,1\n"unfinished\n', encoding="utf-8")
+        report = Path(self.directory.name) / "rejects.csv"
+        report.write_text("existing report", encoding="utf-8")
+        result, _ = self.run_cli(source)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.count(), 0)
+        self.assertEqual(report.read_text(encoding="utf-8"), "existing report")

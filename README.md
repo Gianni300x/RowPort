@@ -59,6 +59,18 @@ The input must be UTF-8 CSV with unique headers matching insertable table column
 
 PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the CSV record number (header = 1), the original row encoded as CSV, and the rejection reason. It is written even when there are no rejected rows and overwrites the selected output file. If writing the report fails after commit, the CLI reports that rows were already saved.
 
+Rows are read one at a time, and rejected rows are staged in a temporary file on
+disk until the database transaction succeeds. Memory use therefore does not grow
+with the number of rows, although disk space is needed for the rejection report.
+
+During import, RowPort prints a progress line every 10,000 processed rows, with
+the counts processed, saved pending commit, and rejected. These counts are
+provisional: an error can roll back all pending inserts. The final summary is
+printed after the transaction commits and the report is written. Progress uses
+separate, immediately flushed stdout lines, so it remains readable in Docker
+logs and when redirected to a file. Errors go to stderr; use `> import.log 2>&1`
+to capture both streams.
+
 ## Tests
 
 ```sh

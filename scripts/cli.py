@@ -1,7 +1,11 @@
 import argparse
 import csv
+import io
 import os
+import shutil
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg
@@ -28,6 +32,7 @@ def database_url(path=Path(".env")):
     return None
 
 
+@contextmanager
 def read_csv(path):
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.reader(source, strict=True)
@@ -36,8 +41,7 @@ def read_csv(path):
             raise InputError("CSV headers must not be empty.")
         if len(set(headers)) != len(headers):
             raise InputError("The CSV contains duplicate columns.")
-        rows = list(reader)
-    return headers, rows
+        yield headers, reader
 
 
 def table_columns(conn, schema, table):
@@ -68,39 +72,52 @@ def validate_headers(headers, columns):
         raise InputError("Missing required columns: " + ", ".join(sorted(missing)))
 
 
-def import_rows(conn, schema, table, headers, rows):
+def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000):
     statement = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
         sql.Identifier(schema), sql.Identifier(table),
         sql.SQL(", ").join(map(sql.Identifier, headers)),
         sql.SQL(", ").join(sql.Placeholder() for _ in headers),
     )
-    rejected = []
+    rejected = 0
     saved = 0
+    writer = csv.writer(report)
+    writer.writerow(["row_number", "csv_row", "reason"])
     for number, row in enumerate(rows, start=2):
         if len(row) != len(headers):
-            rejected.append((number, row, f"Expected {len(headers)} values; got {len(row)}."))
-            continue
-        try:
-            # A savepoint isolates invalid rows; the outer transaction remains atomic.
-            with conn.transaction():
-                conn.execute(statement, row)
-        except (psycopg.DataError, psycopg.IntegrityError) as exc:
-            rejected.append((number, row, exc.diag.message_primary or str(exc)))
+            reason = f"Expected {len(headers)} values; got {len(row)}."
+            write_rejection(writer, number, row, reason)
+            rejected += 1
         else:
-            saved += 1
+            try:
+                # A savepoint isolates invalid rows; the outer transaction remains atomic.
+                with conn.transaction():
+                    conn.execute(statement, row)
+            except (psycopg.DataError, psycopg.IntegrityError) as exc:
+                write_rejection(writer, number, row, exc.diag.message_primary or str(exc))
+                rejected += 1
+            else:
+                saved += 1
+        processed = number - 1
+        if progress and processed % progress_interval == 0:
+            progress(processed, saved, rejected)
     return saved, rejected
 
 
-def write_report(path, headers, rejected):
+def show_progress(processed, saved, rejected):
+    print(f"Progress: {processed} processed; {saved} saved pending commit; "
+          f"{rejected} rejected.", flush=True)
+
+
+def write_rejection(writer, number, row, reason):
+    buffer = io.StringIO(newline="")
+    csv.writer(buffer, lineterminator="").writerow(row)
+    writer.writerow([number, buffer.getvalue(), reason])
+
+
+def write_report(path, report):
+    report.seek(0)
     with path.open("w", encoding="utf-8", newline="") as target:
-        writer = csv.writer(target)
-        # Preserve irregular rows without silently dropping extra fields.
-        writer.writerow(["row_number", "csv_row", "reason"])
-        for number, row, reason in rejected:
-            import io
-            buffer = io.StringIO(newline="")
-            csv.writer(buffer, lineterminator="").writerow(row)
-            writer.writerow([number, buffer.getvalue(), reason])
+        shutil.copyfileobj(report, target)
 
 
 def main(argv=None):
@@ -121,20 +138,21 @@ def main(argv=None):
     if args.csv.resolve() == args.rejects.resolve():
         parser.error("The rejection report must differ from the input CSV.")
     try:
-        headers, rows = read_csv(args.csv)
-        with psycopg.connect(dsn) as conn:
-            with conn.transaction():
-                validate_headers(headers, table_columns(conn, args.schema, args.table))
-                saved, rejected = import_rows(conn, args.schema, args.table, headers, rows)
-        try:
-            write_report(args.rejects, headers, rejected)
-        except OSError as exc:
-            print(f"Saved {saved} rows, but could not write the report: {exc}", file=sys.stderr)
-            return 1
+        with read_csv(args.csv) as (headers, rows), tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as report:
+            with psycopg.connect(dsn) as conn:
+                with conn.transaction():
+                    validate_headers(headers, table_columns(conn, args.schema, args.table))
+                    saved, rejected = import_rows(conn, args.schema, args.table, headers, rows, report,
+                                                  progress=show_progress)
+            try:
+                write_report(args.rejects, report)
+            except OSError as exc:
+                print(f"Saved {saved} rows, but could not write the report: {exc}", file=sys.stderr)
+                return 1
     except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(f"Rows saved: {saved}. Rows rejected: {len(rejected)}. Report: {args.rejects}")
+    print(f"Rows saved: {saved}. Rows rejected: {rejected}. Report: {args.rejects}")
     return 0
 
 
