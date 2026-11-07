@@ -1,6 +1,8 @@
 import argparse
 import csv
 import io
+import itertools
+import json
 import os
 import shutil
 import sys
@@ -33,10 +35,25 @@ def database_url(path=Path(".env")):
     return None
 
 
+def csv_delimiter(value):
+    if len(value) != 1 or value in "\r\n\0\"":
+        raise argparse.ArgumentTypeError("Delimiter must be one character other than a quote, newline, or NUL.")
+    return value
+
+
+def csv_encoding(value):
+    try:
+        with io.TextIOWrapper(io.BytesIO(), encoding=value):
+            pass
+    except (LookupError, ValueError):
+        raise argparse.ArgumentTypeError(f"Unknown or unsupported text encoding: {value}") from None
+    return value
+
+
 @contextmanager
-def read_csv(path):
-    with path.open(encoding="utf-8-sig", newline="") as source:
-        reader = csv.reader(source, strict=True)
+def read_csv(path, delimiter=",", encoding="utf-8-sig"):
+    with path.open(encoding=encoding, newline="") as source:
+        reader = csv.reader(source, delimiter=delimiter, strict=True)
         headers = next(reader, None)
         if not headers or any(not name.strip() for name in headers):
             raise InputError("CSV headers must not be empty.")
@@ -94,7 +111,97 @@ def map_headers(headers, mappings):
     return result
 
 
-def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000, skip_duplicates=False):
+CONFIG_FIELDS = {
+    "table": str, "schema": str, "delimiter": str, "encoding": str,
+    "map": list, "rejects": str, "skip_duplicates": bool, "empty_as_null": bool,
+}
+
+
+def apply_config(parser, argv, fields):
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path)
+    known, _ = pre.parse_known_args(argv)
+    if not known.config:
+        return
+    try:
+        config = json.loads(known.config.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError("configuration must be a JSON object")
+        unknown = set(config) - set(CONFIG_FIELDS)
+        if unknown:
+            raise ValueError("unknown configuration keys: " + ", ".join(sorted(unknown)))
+        for key, value in config.items():
+            if type(value) is not CONFIG_FIELDS[key]:
+                raise ValueError(f"{key} must be {CONFIG_FIELDS[key].__name__}")
+            if key == "map" and not all(isinstance(item, str) for item in value):
+                raise ValueError("map must contain strings")
+            if key in ("table", "schema", "rejects") and not value.strip():
+                raise ValueError(f"{key} cannot be empty")
+        if "delimiter" in config:
+            csv_delimiter(config["delimiter"])
+        if "encoding" in config:
+            csv_encoding(config["encoding"])
+        defaults = {key: value for key, value in config.items() if key in fields}
+        if "rejects" in defaults:
+            defaults["rejects"] = Path(defaults["rejects"])
+        if any(arg == "--map" or arg.startswith("--map=") for arg in argv):
+            defaults.pop("map", None)
+        parser.set_defaults(**defaults)
+    except (OSError, UnicodeError, ValueError, argparse.ArgumentTypeError) as exc:
+        parser.error(f"Invalid configuration: {exc}")
+
+
+def positive_int(value):
+    try:
+        result = int(value)
+        if result <= 0:
+            raise ValueError
+        return result
+    except ValueError:
+        raise argparse.ArgumentTypeError("Must be a positive integer.") from None
+
+
+def preview_main(argv):
+    parser = argparse.ArgumentParser(prog="rowport preview", description="Preview CSV rows without connecting to PostgreSQL.")
+    parser.add_argument("csv", type=Path, help="Input CSV file")
+    parser.add_argument("--config", type=Path, help="JSON configuration file")
+    parser.add_argument("--delimiter", type=csv_delimiter, default=",")
+    parser.add_argument("--encoding", type=csv_encoding, default="utf-8-sig")
+    parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN")
+    parser.add_argument("--limit", type=positive_int, default=5, help="Maximum rows to display (default: 5)")
+    apply_config(parser, argv, {"delimiter", "encoding", "map"})
+    args = parser.parse_args(argv)
+    try:
+        with read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding) as (headers, rows):
+            mapped = map_headers(headers, args.map)
+            print("CSV columns: " + ", ".join(headers))
+            if args.map:
+                print("Mapped columns: " + ", ".join(mapped))
+            print("Preview (JSON arrays, original values):")
+            for number, row in enumerate(itertools.islice(rows, args.limit), start=2):
+                print(f"{number}: {json.dumps(row, ensure_ascii=False)}")
+    except (OSError, UnicodeError, csv.Error, InputError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print("Preview only: no database connection or inserts.")
+    return 0
+
+
+def error_category(exc):
+    if isinstance(exc, psycopg.errors.UniqueViolation):
+        return "Unique constraint"
+    if isinstance(exc, psycopg.errors.NotNullViolation):
+        return "Required value"
+    if isinstance(exc, psycopg.errors.CheckViolation):
+        return "Check constraint"
+    if isinstance(exc, psycopg.errors.ForeignKeyViolation):
+        return "Foreign key constraint"
+    if isinstance(exc, psycopg.DataError):
+        return "Invalid data"
+    return "Other integrity constraint"
+
+
+def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000, skip_duplicates=False, empty_as_null=False, error_counts=None):
     statement = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
         sql.Identifier(schema), sql.Identifier(table),
         sql.SQL(", ").join(map(sql.Identifier, headers)),
@@ -110,20 +217,27 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
             reason = f"Expected {len(headers)} values; got {len(row)}."
             write_rejection(writer, number, row, reason)
             rejected += 1
+            if error_counts is not None:
+                error_counts["Incorrect field count"] += 1
         else:
             try:
                 # A savepoint isolates invalid rows; the outer transaction remains atomic.
                 with conn.transaction():
-                    conn.execute(statement, row)
+                    values = [None if value == "" else value for value in row] if empty_as_null else row
+                    conn.execute(statement, values)
             except psycopg.errors.UniqueViolation as exc:
                 if skip_duplicates and exc.diag.schema_name == schema and exc.diag.table_name == table:
                     skipped += 1
                 else:
                     write_rejection(writer, number, row, exc.diag.message_primary or str(exc))
                     rejected += 1
+                    if error_counts is not None:
+                        error_counts[error_category(exc)] += 1
             except (psycopg.DataError, psycopg.IntegrityError) as exc:
                 write_rejection(writer, number, row, exc.diag.message_primary or str(exc))
                 rejected += 1
+                if error_counts is not None:
+                    error_counts[error_category(exc)] += 1
             else:
                 saved += 1
         processed = number - 1
@@ -156,15 +270,21 @@ def validation_main(argv):
     parser = argparse.ArgumentParser(prog="rowport validate", description="Check CSV headers against an existing PostgreSQL table without importing rows.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
     parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
-    parser.add_argument("--table", required=True, help="Table name")
+    parser.add_argument("--table", help="Table name")
+    parser.add_argument("--config", type=Path, help="JSON configuration file")
     parser.add_argument("--schema", default="public", help="Schema (default: public)")
+    parser.add_argument("--delimiter", type=csv_delimiter, default=",", help="CSV delimiter (default: comma)")
+    parser.add_argument("--encoding", type=csv_encoding, default="utf-8-sig", help="Input CSV encoding (default: UTF-8, with optional BOM)")
     parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
+    apply_config(parser, argv, {"table", "schema", "delimiter", "encoding", "map"})
     args = parser.parse_args(argv)
+    if not args.table:
+        parser.error("--table is required (or set table in --config).")
     try:
         dsn = args.dsn or database_url()
         if not dsn:
             parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
-        with read_csv(args.csv) as (headers, _):
+        with read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding) as (headers, _):
             mapped = map_headers(headers, args.map)
             with psycopg.connect(dsn) as conn:
                 conn.read_only = True
@@ -187,16 +307,26 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "validate" and (len(argv) == 1 or argv[1] == "--help" or not argv[1].startswith("-")):
         return validation_main(argv[1:])
+    if argv and argv[0] == "preview" and (len(argv) == 1 or argv[1] == "--help" or not argv[1].startswith("-")):
+        return preview_main(argv[1:])
     parser = argparse.ArgumentParser(description="Import a CSV into an existing PostgreSQL table.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
     parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
-    parser.add_argument("--table", required=True, help="Table name")
+    parser.add_argument("--table", help="Table name")
+    parser.add_argument("--config", type=Path, help="JSON configuration file")
     parser.add_argument("--schema", default="public", help="Schema (default: public)")
+    parser.add_argument("--delimiter", type=csv_delimiter, default=",", help="CSV delimiter (default: comma)")
+    parser.add_argument("--encoding", type=csv_encoding, default="utf-8-sig", help="Input CSV encoding (default: UTF-8, with optional BOM)")
     parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
-    parser.add_argument("--rejects", type=Path, required=True, help="Rejected rows CSV file")
-    parser.add_argument("--skip-duplicates", action="store_true", help="Skip unique constraint violations on the target table")
-    parser.epilog = "To check headers without importing: rowport validate CSV --table TABLE"
+    parser.add_argument("--rejects", type=Path, help="Rejected rows CSV file")
+    parser.add_argument("--skip-duplicates", action=argparse.BooleanOptionalAction, default=False, help="Skip unique constraint violations on the target table")
+    parser.add_argument("--empty-as-null", action=argparse.BooleanOptionalAction, default=False, help="Insert empty CSV fields as SQL NULL")
+    parser.add_argument("--dry-run", action="store_true", help="Test import and roll back inserted rows")
+    parser.epilog = "Check headers: rowport validate CSV --table TABLE. Preview rows: rowport preview CSV."
+    apply_config(parser, argv, set(CONFIG_FIELDS))
     args = parser.parse_args(argv)
+    if not args.table or not args.rejects:
+        parser.error("--table and --rejects are required (or set them in --config).")
     try:
         dsn = args.dsn or database_url()
     except (OSError, UnicodeError) as exc:
@@ -206,26 +336,41 @@ def main(argv=None):
         parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
     if args.csv.resolve() == args.rejects.resolve():
         parser.error("The rejection report must differ from the input CSV.")
+    if args.config and args.config.resolve() == args.rejects.resolve():
+        parser.error("The rejection report must differ from the configuration file.")
     try:
-        with read_csv(args.csv) as (headers, rows), tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as report:
+        error_counts = Counter()
+        with read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding) as (headers, rows), tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as report:
             headers = map_headers(headers, args.map)
             with psycopg.connect(dsn) as conn:
                 with conn.transaction():
                     validate_headers(headers, table_columns(conn, args.schema, args.table))
                     saved, rejected, skipped = import_rows(conn, args.schema, args.table, headers, rows, report,
-                                                           progress=show_progress, skip_duplicates=args.skip_duplicates)
+                                                           progress=show_progress, skip_duplicates=args.skip_duplicates,
+                                                           empty_as_null=args.empty_as_null, error_counts=error_counts)
+                    if args.dry_run:
+                        conn.execute("SET CONSTRAINTS ALL IMMEDIATE")
+                        raise psycopg.Rollback()
             try:
                 write_report(args.rejects, report)
             except OSError as exc:
-                print(f"Saved {saved} rows, but could not write the report: {exc}", file=sys.stderr)
+                message = "Dry run rolled back" if args.dry_run else f"Saved {saved} rows"
+                print(f"{message}, but could not write the report: {exc}", file=sys.stderr)
                 return 1
     except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    summary = f"Rows saved: {saved}. Rows rejected: {rejected}."
+    summary = (f"Dry run: rows that would be saved: {saved}. Rows rejected: {rejected}."
+               if args.dry_run else f"Rows saved: {saved}. Rows rejected: {rejected}.")
     if args.skip_duplicates:
         summary += f" Duplicates skipped: {skipped}."
     print(f"{summary} Report: {args.rejects}")
+    if error_counts:
+        print("Rejection summary:")
+        for category, count in sorted(error_counts.items()):
+            print(f"  {category}: {count}")
+    if args.dry_run:
+        print("Dry run rolled back the transaction; no rows were saved.")
     return 0
 
 

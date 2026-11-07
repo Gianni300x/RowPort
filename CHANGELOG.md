@@ -6,6 +6,14 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
+- Preview parsed CSV rows without connecting to PostgreSQL.
+- Group rejected rows by error category in the console summary.
+- Reuse import, validation and preview options from a JSON configuration file.
+- Test an import with `--dry-run`, rolling back the transaction after validation.
+- Support selecting the input CSV encoding for validation and import.
+- Add a README reference table for command options and defaults.
+- Optionally insert empty CSV fields as SQL `NULL` with `--empty-as-null`.
+- Support a custom single-character CSV delimiter for validation and import.
 - Add a demonstration of the `--skip-duplicates` option to the README.
 - Optionally skip target-table unique constraint violations and count them separately.
 - Map CSV headers to different PostgreSQL column names with repeatable `--map` options.

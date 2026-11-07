@@ -1,3 +1,4 @@
+import argparse
 import csv
 import io
 import tempfile
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 import psycopg
 
-from scripts.cli import InputError, database_url, import_rows, main, map_headers, read_csv, show_progress, validate_headers, write_report
+from scripts.cli import InputError, csv_delimiter, csv_encoding, database_url, import_rows, main, map_headers, read_csv, show_progress, validate_headers, write_report
 
 
 class Connection:
@@ -35,6 +36,18 @@ class Connection:
 
 
 class RowPortTests(unittest.TestCase):
+    def test_encoding_must_be_supported_for_text(self):
+        self.assertEqual(csv_encoding("latin-1"), "latin-1")
+        for value in ("not-a-real-encoding", "base64_codec", ""):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                csv_encoding(value)
+
+    def test_delimiter_requires_one_safe_character(self):
+        self.assertEqual(csv_delimiter(";"), ";")
+        for value in ("", "::", "\n", "\r", "\0", '"'):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                csv_delimiter(value)
+
     def test_column_mappings_and_collisions(self):
         self.assertEqual(map_headers(["street", "price", "bedrooms"],
                                      ["street=address", "bedrooms=rooms"]),

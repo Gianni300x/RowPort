@@ -1,0 +1,10 @@
+{
+  "table": "properties",
+  "schema": "public",
+  "delimiter": ",",
+  "encoding": "utf-8-sig",
+  "map": [],
+  "rejects": "rejects.csv",
+  "skip_duplicates": false,
+  "empty_as_null": false
+}

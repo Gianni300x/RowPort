@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -139,6 +140,161 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.count(), 2)
         with report.open(encoding="utf-8", newline="") as f:
             self.assertEqual(len(list(csv.DictReader(f))), 4)
+
+    def test_semicolon_delimiter_with_quoted_values_and_mapping(self):
+        source = Path(self.directory.name) / "semicolon.csv"
+        source.write_text('street;price;rooms\n"Main; Street";100;2\n"Bad; Street";invalid;3\n', encoding="utf-8")
+        report = Path(self.directory.name) / "semicolon-rejects.csv"
+        common = [str(source), "--dsn", DSN, "--schema", self.schema, "--table", "properties",
+                  "--delimiter", ";", "--map", "street=address"]
+        validation = subprocess.run([sys.executable, "-m", "scripts.cli", "validate", *common],
+                                    cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(validation.returncode, 0, validation.stderr)
+        self.assertEqual(self.count(), 0)
+        result = subprocess.run([sys.executable, "-m", "scripts.cli", *common, "--rejects", str(report)],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with psycopg.connect(DSN) as conn:
+            address = conn.execute(sql.SQL("SELECT address FROM {}.properties").format(sql.Identifier(self.schema))).fetchone()[0]
+        self.assertEqual(address, "Main; Street")
+        with report.open(encoding="utf-8", newline="") as f:
+            rejected = list(csv.DictReader(f))
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["Bad; Street", "invalid", "3"])
+
+    def test_empty_as_null_is_opt_in_and_preserves_rejections(self):
+        with psycopg.connect(DSN) as conn:
+            for table in ("default_values", "null_values"):
+                conn.execute(sql.SQL("CREATE TABLE {}.{} (name text NOT NULL, note text, amount integer)")
+                             .format(sql.Identifier(self.schema), sql.Identifier(table)))
+        source = Path(self.directory.name) / "empty.csv"
+        source.write_text('name,note,amount\nFirst,,\nSecond,"",5\nThird, ,7\n,comment,9\n', encoding="utf-8")
+
+        def run(table, flag):
+            report = Path(self.directory.name) / f"{table}.csv"
+            result = subprocess.run([sys.executable, "-m", "scripts.cli", str(source), "--dsn", DSN,
+                                     "--schema", self.schema, "--table", table, "--rejects", str(report), *flag],
+                                    cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with report.open(encoding="utf-8", newline="") as f:
+                return result.stdout, list(csv.DictReader(f))
+
+        output, rejected = run("default_values", [])
+        self.assertIn("Rows saved: 3. Rows rejected: 1.", output)
+        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["First", "", ""])
+        output, rejected = run("null_values", ["--empty-as-null"])
+        self.assertIn("Rows saved: 3. Rows rejected: 1.", output)
+        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["", "comment", "9"])
+        with psycopg.connect(DSN) as conn:
+            rows = conn.execute(sql.SQL("SELECT name, note, amount FROM {}.null_values ORDER BY name")
+                                .format(sql.Identifier(self.schema))).fetchall()
+        self.assertEqual(rows, [("First", None, None), ("Second", None, 5), ("Third", " ", 7)])
+
+    def test_latin1_encoding_and_decoding_error(self):
+        source = Path(self.directory.name) / "latin1.csv"
+        source.write_bytes('address;price;rooms\nAvenida España;100;2\nNiño;invalid;3\n'.encode("latin-1"))
+        report = Path(self.directory.name) / "latin1-rejected.csv"
+        common = [str(source), "--dsn", DSN, "--schema", self.schema, "--table", "properties",
+                  "--delimiter", ";"]
+        bad = subprocess.run([sys.executable, "-m", "scripts.cli", *common, "--rejects", str(report)],
+                             cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertEqual(self.count(), 0)
+        self.assertFalse(report.exists())
+        validation = subprocess.run([sys.executable, "-m", "scripts.cli", "validate", *common,
+                                     "--encoding", "latin-1"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(validation.returncode, 0, validation.stderr)
+        result = subprocess.run([sys.executable, "-m", "scripts.cli", *common, "--encoding", "latin-1",
+                                 "--rejects", str(report)], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with psycopg.connect(DSN) as conn:
+            address = conn.execute(sql.SQL("SELECT address FROM {}.properties").format(sql.Identifier(self.schema))).fetchone()[0]
+        self.assertEqual(address, "Avenida España")
+        with report.open(encoding="utf-8", newline="") as f:
+            rejected = list(csv.DictReader(f))
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("Niño", rejected[0]["csv_row"])
+
+    def test_config_preview_and_dry_run(self):
+        source = Path(self.directory.name) / "custom.csv"
+        source.write_text('street;price;rooms\n"First; Street";100;2\nBad;invalid;3\n', encoding="utf-8")
+        report = Path(self.directory.name) / "dry-report.csv"
+        config = Path(self.directory.name) / "import.json"
+        config.write_text(json.dumps({"schema": self.schema, "table": "wrong_table", "delimiter": ";",
+                                      "map": ["street=address"], "rejects": str(report),
+                                      "empty_as_null": True}), encoding="utf-8")
+        base = [sys.executable, "-m", "scripts.cli"]
+        preview = subprocess.run([*base, "preview", str(source), "--config", str(config), "--limit", "1"],
+                                 cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertIn('2: ["First; Street", "100", "2"]', preview.stdout)
+        self.assertNotIn('3: [', preview.stdout)
+        self.assertIn("Mapped columns: address, price, rooms", preview.stdout)
+        self.assertEqual(self.count(), 0)
+        result = subprocess.run([*base, str(source), "--config", str(config), "--table", "properties",
+                                 "--dsn", DSN, "--dry-run"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rows that would be saved: 1. Rows rejected: 1.", result.stdout)
+        self.assertIn("Invalid data: 1", result.stdout)
+        self.assertIn("no rows were saved", result.stdout)
+        self.assertEqual(self.count(), 0)
+        with report.open(encoding="utf-8", newline="") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 1)
+
+    def test_invalid_config_does_not_modify_database(self):
+        config = Path(self.directory.name) / "invalid.json"
+        config.write_text('{"table": "properties", "skip_duplicates": "false"}', encoding="utf-8")
+        result = subprocess.run([sys.executable, "-m", "scripts.cli", str(ROOT / "examples/properties.csv"),
+                                 "--config", str(config), "--dsn", DSN, "--rejects", str(Path(self.directory.name) / "out.csv")],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("skip_duplicates must be bool", result.stderr)
+        self.assertEqual(self.count(), 0)
+
+    def test_dry_run_checks_deferred_constraint_and_rolls_back(self):
+        with psycopg.connect(DSN) as conn:
+            conn.execute(sql.SQL("ALTER TABLE {}.properties ADD CONSTRAINT unique_address UNIQUE (address) DEFERRABLE INITIALLY DEFERRED")
+                         .format(sql.Identifier(self.schema)))
+        source = Path(self.directory.name) / "deferred.csv"
+        source.write_text("address,price,rooms\nSame,100,1\nSame,200,2\n", encoding="utf-8")
+        report = Path(self.directory.name) / "deferred-rejected.csv"
+        result = subprocess.run([sys.executable, "-m", "scripts.cli", str(source), "--dsn", DSN,
+                                 "--schema", self.schema, "--table", "properties", "--rejects", str(report),
+                                 "--dry-run"], cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unique_address", result.stderr)
+        self.assertEqual(self.count(), 0)
+        self.assertFalse(report.exists())
+
+    def test_summary_groups_different_rejections(self):
+        with psycopg.connect(DSN) as conn:
+            conn.execute(sql.SQL("ALTER TABLE {}.properties ADD UNIQUE (address)").format(sql.Identifier(self.schema)))
+            conn.execute(sql.SQL("INSERT INTO {}.properties (address, price, rooms) VALUES ('Same', 100, 1)")
+                         .format(sql.Identifier(self.schema)))
+        source = Path(self.directory.name) / "categories.csv"
+        source.write_text("address,price,rooms\nSame,100,1\nBad,not-a-number,1\nShort,100\n", encoding="utf-8")
+        result, report = self.run_cli(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Incorrect field count: 1", result.stdout)
+        self.assertIn("Invalid data: 1", result.stdout)
+        self.assertIn("Unique constraint: 1", result.stdout)
+        with report.open(encoding="utf-8", newline="") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 3)
+
+    def test_config_cli_overrides_boolean_and_mappings(self):
+        source = Path(self.directory.name) / "override.csv"
+        source.write_text("street,price,rooms\nFirst,100,2\n", encoding="utf-8")
+        config = Path(self.directory.name) / "override.json"
+        report = Path(self.directory.name) / "override-rejected.csv"
+        config.write_text(json.dumps({"schema": self.schema, "table": "properties", "rejects": str(report),
+                                      "map": ["street=wrong"], "skip_duplicates": True}), encoding="utf-8")
+        result = subprocess.run([sys.executable, "-m", "scripts.cli", str(source), "--dsn", DSN,
+                                 "--config", str(config), "--map", "street=address", "--no-skip-duplicates"],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Rows saved: 1.", result.stdout)
+        self.assertNotIn("Duplicates skipped:", result.stdout)
+        self.assertEqual(self.count(), 1)
 
     def test_database_failure_rolls_back_prior_insert(self):
         with psycopg.connect(DSN) as conn:
