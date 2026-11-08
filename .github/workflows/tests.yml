@@ -1,0 +1,64 @@
+name: Tests
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-integration:
+    name: PostgreSQL / Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.14']
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: rowport
+          POSTGRES_PASSWORD: rowport-test
+          POSTGRES_DB: rowport_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rowport -d rowport_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install RowPort
+        run: python -m pip install .
+      - name: Run unit and PostgreSQL integration tests
+        env:
+          ROWPORT_TEST_DSN: postgresql://rowport:rowport-test@127.0.0.1:5432/rowport_test
+        run: python -m unittest discover -s tests -v
+
+  windows-unit:
+    name: Windows unit tests / Python ${{ matrix.python }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.14']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install RowPort
+        run: python -m pip install .
+      - name: Run CLI and progress unit tests
+        run: |
+          python -m unittest discover -s tests -p test_cli.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_progress.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -21,11 +21,16 @@ Need to change how a file is read, preview it, or test without committing rows?
 See [more ways to use RowPort](#more-ways-to-use-rowport). You do not need to
 configure those options for a basic import.
 
+## Interactive demo
+
+![Interactive import with progress, rejected rows and retry](docs/rowport-demo.gif)
+
+This accelerated replay shows real output from imports into a temporary
+PostgreSQL schema: 1,998 rows are saved, two prices are corrected in a CSV
+editor, and the two rejected rows are imported with `rowport retry`. The
+correction step is summarized on screen; the editor itself is not recorded.
+
 ## Quick demo with Docker
-
-![Accelerated recording of a RowPort import](docs/rowport-demo.gif)
-
-The demo above shows real output from a Docker run, replayed at an accelerated pace.
 
 Install and start Docker with the Compose plugin, then clone this repository and run:
 
@@ -352,9 +357,9 @@ rowport data.csv --table properties --rejects rejects.csv --skip-duplicates
 
 ![Demonstration of importing with duplicate rows skipped](docs/skip-duplicates.gif)
 
-This replay shows actual output from a test using a temporary PostgreSQL schema:
-one new row is saved, two duplicate rows are skipped, and an invalid row is
-written to the rejection report.
+This accelerated terminal replay shows actual output from a test using a
+temporary PostgreSQL schema: one new row is saved, two duplicate rows are
+skipped, and an invalid row is written to the rejection report.
 
 Skipped rows are counted separately and do not appear in the rejection report.
 This relies on unique constraints or unique indexes in PostgreSQL: without one,
@@ -395,22 +400,22 @@ The table below summarizes the options for each command:
 
 | Option | Available for | Default or requirement | What it does |
 | --- | --- | --- | --- |
-| `--table TABLE` | Import, validate | Required, unless supplied by `--config` | Selects the existing PostgreSQL table. |
-| `--rejects FILE` | Import | Required, unless supplied by `--config` | Writes rejected rows and their reasons to a CSV report. |
-| `--dsn CONNECTION` | Import, validate | `DATABASE_URL` environment variable, then `.env` | Sets the PostgreSQL connection string and overrides `DATABASE_URL`. |
-| `--schema SCHEMA` | Import, validate | `public` | Selects the schema containing the target table. |
-| `--config FILE` | Import, validate, preview | None | Loads reusable options from a JSON file. |
+| `--table TABLE` | Import, retry, validate | Required, unless supplied by `--config` | Selects the existing PostgreSQL table. |
+| `--rejects FILE` | Import, retry | Required, unless supplied by `--config` | Writes rejected rows and their reasons to a CSV report. |
+| `--dsn CONNECTION` | Import, retry, validate | `DATABASE_URL` environment variable, then `.env` | Sets the PostgreSQL connection string and overrides `DATABASE_URL`. |
+| `--schema SCHEMA` | Import, retry, validate | `public` | Selects the schema containing the target table. |
+| `--config FILE` | Import, retry, validate, preview | None | Loads reusable options from a JSON file. |
 | `--delimiter CHAR` | Import, validate, preview | Comma (`,`) | Sets the input CSV delimiter, for example `--delimiter ';'`. |
 | `--encoding NAME` | Import, validate, preview | UTF-8 (optional BOM) | Sets the input CSV encoding, for example `--encoding latin-1`. |
-| `--map CSV_COLUMN=TABLE_COLUMN` | Import, validate, preview | CSV and table column names must match | Maps a CSV column to a table column; repeat the option for multiple columns. |
-| `--postgres-csv` | Import, validate, preview | Off | Uses PostgreSQL's default CSV convention to distinguish `NULL` from empty text. |
-| `--skip-duplicates` | Import | Off; unique violations are rejected | Skips eligible unique-constraint conflicts and counts them separately. |
-| `--empty-as-null` | Import | Off; empty fields are sent as empty strings | Sends empty fields as SQL `NULL`. |
-| `--no-skip-duplicates`, `--no-empty-as-null` | Import | — | Override the corresponding enabled JSON configuration option. |
-| `--no-postgres-csv` | Import, validate, preview | — | Overrides `postgres_csv: true` in the configuration file. |
-| `--dry-run` | Import | Off | Tests insertion and rolls back the transaction. |
+| `--map CSV_COLUMN=TABLE_COLUMN` | Import, retry, validate, preview | CSV and table column names must match | Maps a CSV column to a table column; repeat the option for multiple columns. |
+| `--postgres-csv` | Import, retry, validate, preview | Off | Uses PostgreSQL's default CSV convention to distinguish `NULL` from empty text. |
+| `--skip-duplicates` | Import, retry | Off; unique violations are rejected | Skips eligible unique-constraint conflicts and counts them separately. |
+| `--empty-as-null` | Import, retry | Off; empty fields are sent as empty strings | Sends empty fields as SQL `NULL`. |
+| `--no-skip-duplicates`, `--no-empty-as-null` | Import, retry | — | Override the corresponding enabled JSON configuration option. |
+| `--no-postgres-csv` | Import, retry, validate, preview | — | Overrides `postgres_csv: true` in the configuration file. |
+| `--dry-run` | Import, retry | Off | Tests insertion and rolls back the transaction. |
 | `--limit N` | Preview | 5 rows | Limits the number of rows displayed. |
-| `-h`, `--help` | Import, validate, preview | — | Displays help for the selected command. |
+| `-h`, `--help` | Import, retry, validate, preview | — | Displays help for the selected command. |
 
 Run `rowport --help`, `rowport retry --help`, `rowport validate --help`, or `rowport preview --help` for command help.
 Options for `validate` and `preview` can appear before or after the CSV path.
@@ -428,8 +433,9 @@ To import a file literally named `retry`, `validate` or `preview`, use `./retry`
 - **Cannot decode the file:** verify its encoding and pass `--encoding`, for example `--encoding latin-1`.
 - **Malformed CSV:** check the input delimiter and quoting; use `--delimiter` if the file is not comma-separated.
 
-For database errors other than connection failures, RowPort reports the database
-error message. Per-row errors are detailed in the rejection report.
+For other database errors, RowPort may display the database error message;
+some common errors use a concise explanation instead. Per-row errors are
+detailed in the rejection report.
 
 ## Tests
 
@@ -443,12 +449,18 @@ The unit tests use simulated database responses. Integration tests can be run ag
 ROWPORT_TEST_DSN="$DATABASE_URL" python -m unittest discover -s tests -v
 ```
 
+GitHub Actions runs the full suite with a disposable PostgreSQL service on Linux
+and the CLI and progress unit tests on Windows, using Python 3.10 and 3.14.
+The workflow runs for pushes, pull requests, and manual dispatches. Windows
+integration with PostgreSQL is not part of this workflow.
+
 ## Code structure
 
 - `scripts/cli.py` handles commands, arguments and console output.
 - `scripts/config.py` reads connection settings and reusable configurations.
 - `scripts/csv_io.py` reads and interprets CSV input and column mappings.
 - `scripts/importer.py` validates the table, imports rows and manages reports.
+- `scripts/progress.py` renders the interactive progress bar.
 - `scripts/errors.py` defines errors shared by those modules.
 
 ## License
