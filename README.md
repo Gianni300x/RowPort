@@ -5,14 +5,16 @@ RowPort is a Python CLI that imports CSV files into an existing PostgreSQL table
 ## Start here
 
 Once RowPort is installed and connected to PostgreSQL, a basic import needs only
-your CSV, an existing table, and a path for rejected rows:
+your CSV, an existing table, and a path for rejected rows. Create a `reports`
+directory in the project first (`mkdir -p reports` on macOS/Linux, or
+`New-Item -ItemType Directory -Force reports` in PowerShell), then run:
 
 ```sh
-rowport data.csv --table products --rejects rejects.csv
+rowport data.csv --table products --rejects reports/rejects.csv
 ```
 
 Valid rows are inserted into `products`; invalid rows and their reasons are
-written to `rejects.csv`. RowPort prints progress and a final summary. By
+written to `reports/rejects.csv`. RowPort prints progress and a final summary. By
 default, the CSV uses UTF-8 and comma-separated column names that match the
 table. [Set up your database and run an example](#usage), or try the
 [Docker demo](#quick-demo-with-docker) first.
@@ -125,10 +127,10 @@ the version and installation path):
 Then import the example CSV:
 
 ```sh
-rowport examples/properties.csv --table properties --rejects rejects.csv
+rowport examples/properties.csv --table properties --rejects reports/rejects.csv
 ```
 
-Open `rejects.csv` to see the rejected row and its reason. For your own CSV,
+Open `reports/rejects.csv` to see the rejected row and its reason. For your own CSV,
 replace the file and table names; the destination table must already exist.
 
 The connection can also be supplied as an environment variable or with `--dsn`.
@@ -183,7 +185,7 @@ columns could look like this:
   "delimiter": ";",
   "encoding": "utf-8-sig",
   "map": ["street=address", "bedrooms=rooms"],
-  "rejects": "rejects.csv",
+  "rejects": "reports/rejects.csv",
   "skip_duplicates": false,
   "empty_as_null": false,
   "postgres_csv": false
@@ -212,7 +214,7 @@ or `--no-empty-as-null` to override a `true` value in the configuration. Use
 ### Test an import
 
 ```sh
-rowport data.csv --table properties --rejects rejects.csv --dry-run
+rowport data.csv --table properties --rejects reports/rejects.csv --dry-run
 ```
 
 This executes inserts in a transaction and rolls it back, then writes the
@@ -252,7 +254,7 @@ The same mappings can be used for validation and import:
 
 ```sh
 rowport validate properties.csv --table properties --map street=address --map bedrooms=rooms
-rowport properties.csv --table properties --map street=address --map bedrooms=rooms --rejects rejects.csv
+rowport properties.csv --table properties --map street=address --map bedrooms=rooms --rejects reports/rejects.csv
 ```
 
 Mappings must reference existing CSV columns and distinct insertable table
@@ -265,7 +267,7 @@ For CSV files using a different delimiter, pass a single character with
 
 ```sh
 rowport validate properties.csv --table properties --delimiter ';'
-rowport properties.csv --table properties --delimiter ';' --rejects rejects.csv
+rowport properties.csv --table properties --delimiter ';' --rejects reports/rejects.csv
 ```
 
 The rejection report uses commas and UTF-8 regardless of the input format.
@@ -275,7 +277,7 @@ another encoding, set `--encoding` on import or validation:
 
 ```sh
 rowport validate datos.csv --table properties --encoding latin-1
-rowport datos.csv --table properties --encoding latin-1 --rejects rejects.csv
+rowport datos.csv --table properties --encoding latin-1 --rejects reports/rejects.csv
 ```
 
 The rejection report is always written in UTF-8. CSV fields can contain up to
@@ -291,7 +293,7 @@ sent as empty strings, not `NULL`, unless `--empty-as-null` is used.
 To insert empty fields as SQL `NULL` instead, use:
 
 ```sh
-rowport data.csv --table properties --rejects rejects.csv --empty-as-null
+rowport data.csv --table properties --rejects reports/rejects.csv --empty-as-null
 ```
 
 Both quoted and unquoted empty fields become `NULL`; whitespace-only values are
@@ -308,7 +310,7 @@ that distinction, opt into PostgreSQL CSV interpretation:
 ```sh
 rowport preview exported.csv --postgres-csv
 rowport validate exported.csv --table properties --postgres-csv
-rowport exported.csv --table properties --postgres-csv --rejects rejects.csv
+rowport exported.csv --table properties --postgres-csv --rejects reports/rejects.csv
 ```
 
 An unquoted empty field becomes SQL `NULL`, `""` remains empty text, and
@@ -325,40 +327,57 @@ quoting and lose this distinction; use a text editor if it matters.
 
 ### Understand the import results
 
-PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the original CSV columns followed by `rowport_record` (header = 1), `rowport_error`, and `rowport_extra`. If a source column already uses a diagnostic name, underscores are appended to the diagnostic name to avoid a collision. Rows with missing fields are padded with empty values; extra fields are retained as a JSON array in `rowport_extra`. This replaces the previous `row_number,csv_row,reason` report format. RowPort checks the report destination before inserting and stages the report in the destination directory. It replaces the selected output after a successful import, even when there are no rejected rows. If publishing the report fails after commit, the CLI reports that rows were already saved and leaves any existing report in place. The report must be a different file from the input and configuration, including hard links.
+PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the original CSV columns followed by `rowport_record` (header = 1), `rowport_error`, `rowport_extra`, and `rowport_encoding`. If a source column already uses a diagnostic name, underscores are appended to the diagnostic name to avoid a collision. Rows with missing fields are padded with empty values; extra fields are retained as a JSON array in `rowport_extra`. This replaces the previous `row_number,csv_row,reason` report format. RowPort checks the report destination before inserting and stages the report in the destination directory. It replaces the selected output after a successful import, even when there are no rejected rows. If publishing the report fails after commit, the CLI reports that rows were already saved and leaves any existing report in place. The report must be a different file from the input and configuration, including hard links.
+
+Rejection reports contain the original data, which may be sensitive. The
+examples use the Git-ignored `reports/` directory. Keep source CSV files and
+reports outside a repository or make sure their paths are ignored before using
+`git add`; custom paths are not automatically protected.
+
+To reduce spreadsheet formula injection, new reports prefix potentially risky
+text and headers with an apostrophe and mark the encoding in `rowport_encoding`.
+`rowport retry` reverses that escaping; older reports with three diagnostic
+columns remain supported. Spreadsheet programs vary and may remove or rewrite
+prefixes when saving: for untrusted CSVs, prefer a plain text or CSV editor
+that does not evaluate formulas, and preserve the encoding column and prefixes.
+Do not assume that an edited or re-exported file remains safe to open in a
+spreadsheet. When editing encoded values, preserve the leading apostrophe; a
+literal value that starts with an apostrophe must use two. SQL NULL and empty
+text remain distinct with `--postgres-csv`.
 
 ### Correct and retry rejected rows
 
-Open the report in a CSV editor and correct the original columns. Keep the three
-diagnostic columns in place: `rowport retry` ignores them when inserting rows.
+Open the report in a CSV editor and correct the original columns. Keep the four
+diagnostic columns in place: `rowport retry` checks the encoding and extra
+fields but does not insert these diagnostic columns.
 For a row with too many fields, inspect `rowport_extra`, move any needed values
 to the original columns, and clear that cell. Fill in any missing fields. Save
 as UTF-8 CSV, preserving all columns and their order, then use a **different**
 path for the new rejection report:
 
 ```sh
-rowport retry rejects.csv --table products --rejects retry-rejects.csv
+rowport retry reports/rejects.csv --table products --rejects reports/retry-rejects.csv
 ```
 
-For the `examples/properties.csv` import above, `rejects.csv` contains a row
+For the `examples/properties.csv` import above, `reports/rejects.csv` contains a row
 like this (the exact PostgreSQL detail can differ):
 
-| address | price | rooms | rowport_record | rowport_error | rowport_extra |
-| --- | --- | --- | --- | --- | --- |
-| 456 Maple Street | not a price | 2 | 3 | A value does not match the expected data type. PostgreSQL: invalid input syntax for type numeric: "not a price" | *(empty)* |
+| address | price | rooms | rowport_record | rowport_error | rowport_extra | rowport_encoding |
+| --- | --- | --- | --- | --- | --- | --- |
+| 456 Maple Street | not a price | 2 | 3 | A value does not match the expected data type. PostgreSQL: invalid input syntax for type numeric: "not a price" | *(empty)* | rowport-spreadsheet-v1 |
 
 In your CSV editor, change `price` from `not a price` to a valid number such as
-`95000`. Leave the other cells and the three diagnostic columns as they are,
+`95000`. Leave the other cells and the four diagnostic columns as they are,
 then save the file. From the same directory, run:
 
 ```sh
-rowport retry rejects.csv --table properties --rejects retry-rejects.csv
+rowport retry reports/rejects.csv --table properties --rejects reports/retry-rejects.csv
 ```
 
 A successful retry reports `Rows saved: 1. Rows rejected: 0.` The original
-`rejects.csv` remains available; `retry-rejects.csv` contains only rows that
+`reports/rejects.csv` remains available; `reports/retry-rejects.csv` contains only rows that
 were still rejected, if any. If you save the corrected file under a different
-name, replace `rejects.csv` in the command with that name.
+name, replace `reports/rejects.csv` in the command with that name.
 
 Use the same `--schema`, column mappings and import behavior as the original
 import, if applicable. Reports use comma delimiters and UTF-8 even if the
@@ -366,8 +385,8 @@ original file did not; `retry` reads that format regardless of `--delimiter`
 and `--encoding`. For PostgreSQL exports, keep `--postgres-csv` and preserve CSV
 quoting when editing. Previously saved rows are not in the report, so a retry
 only processes the rejected rows. Rows still invalid appear in the new report.
-Older reports in the `row_number,csv_row,reason` format cannot be retried using
-this command.
+Older reports with three diagnostic columns remain supported; the original
+`row_number,csv_row,reason` format cannot be retried with this command.
 
 When rows are rejected, the console also groups them into broad categories such
 as invalid data, unique constraints, missing required values, and incorrect
@@ -377,7 +396,7 @@ explanation followed by PostgreSQL's original message.
 For example, an import with four invalid numeric values can end with:
 
 ```text
-Rows saved: 199996. Rows rejected: 4. Report: rejects.csv
+Rows saved: 199996. Rows rejected: 4. Report: reports/rejects.csv
 Rejection summary:
   Invalid data: 4
 ```
@@ -388,7 +407,7 @@ By default, unique constraint violations are rejected like other invalid rows.
 To skip violations reported on the target table instead, use:
 
 ```sh
-rowport data.csv --table properties --rejects rejects.csv --skip-duplicates
+rowport data.csv --table properties --rejects reports/rejects.csv --skip-duplicates
 ```
 
 ![Demonstration of importing with duplicate rows skipped](docs/skip-duplicates.gif)

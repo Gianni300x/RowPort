@@ -152,6 +152,8 @@ activemq-data/
 # Environments
 /reports/
 /rejects-200000.csv
+/rejects.csv
+/retry-rejects.csv
 .env
 .envrc
 .venv

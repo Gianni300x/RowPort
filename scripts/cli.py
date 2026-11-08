@@ -211,8 +211,8 @@ def _main(argv=None):
             progress_bar.start(total)
         with read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding, postgres_csv=args.postgres_csv) as (headers, rows), staged_report(args.rejects) as (target, report):
             if retry:
-                headers = retry_headers(headers)
-                rows = retry_rows(rows, len(headers))
+                headers, safe_report = retry_headers(headers)
+                rows = retry_rows(rows, len(headers), safe=safe_report)
             source_headers = headers
             headers = map_headers(headers, args.map)
             with psycopg.connect(dsn) as conn:

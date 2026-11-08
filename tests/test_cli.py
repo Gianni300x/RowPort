@@ -206,7 +206,7 @@ class RowPortTests(unittest.TestCase):
                 records = list(csv.reader(report))
             self.assertEqual([int(row[2]) for row in records[1:]], [3, 4])
             self.assertEqual(records[2][:2], ["extra", "3"])
-            self.assertEqual(records[2][-1], '["4"]')
+            self.assertEqual(records[2][-2], '["4"]')
 
     def test_rejection_explanations_keep_database_details(self):
         from scripts.importer import rejection_message
@@ -229,7 +229,29 @@ class RowPortTests(unittest.TestCase):
         original = ["rowport_record", "rowport_error", "rowport_extra"]
         diagnostic = report_metadata_headers(original)
         self.assertEqual(diagnostic, ["rowport_record_", "rowport_error_", "rowport_extra_"])
-        self.assertEqual(retry_headers(original + diagnostic), original)
+        self.assertEqual(retry_headers(original + diagnostic), (original, False))
+
+    def test_spreadsheet_escaping_is_reversible_and_legacy_reports_are_supported(self):
+        from scripts.importer import spreadsheet_escape, spreadsheet_unescape, report_metadata_headers, retry_headers, retry_rows
+        values = ["=1+2", "+1", "-42", "@sum", "\tdata", "\rdata", "\nvalue", "  =1+2", "'=literal", "'normal", "normal", "", None]
+        for value in values:
+            with self.subTest(value=value):
+                encoded = spreadsheet_escape(value)
+                self.assertEqual(spreadsheet_unescape(encoded), value)
+                if isinstance(value, str) and value and (value[0] in "=+-@\t\r\n" or value.lstrip().startswith("=")):
+                    self.assertTrue(encoded.startswith("'"))
+        headers = ["=header", "rowport_encoding"]
+        safe_headers = [spreadsheet_escape(h) for h in headers] + report_metadata_headers(headers, safe=True)
+        decoded_headers, safe = retry_headers(safe_headers)
+        self.assertEqual(decoded_headers, headers)
+        self.assertTrue(safe)
+        self.assertEqual(list(retry_rows([["'=1+2", "''=literal", "2", "error", "", "rowport-spreadsheet-v1"]], 2, safe)), [["=1+2", "'=literal"]])
+        legacy_headers, safe = retry_headers(["value", "rowport_record", "rowport_error", "rowport_extra"])
+        self.assertEqual(legacy_headers, ["value"])
+        self.assertFalse(safe)
+        self.assertEqual(list(retry_rows([["'=literal", "2", "error", ""]], 1, safe)), [["'=literal"]])
+        with self.assertRaisesRegex(InputError, "encoding marker"):
+            list(retry_rows([["'=1+2", "2", "error", "", ""]], 1, True))
 
     def test_retry_refuses_unresolved_extra_fields(self):
         from scripts.importer import retry_rows

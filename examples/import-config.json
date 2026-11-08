@@ -4,7 +4,7 @@
   "delimiter": ",",
   "encoding": "utf-8-sig",
   "map": [],
-  "rejects": "rejects.csv",
+  "rejects": "reports/rejects.csv",
   "skip_duplicates": false,
   "empty_as_null": false,
   "postgres_csv": false

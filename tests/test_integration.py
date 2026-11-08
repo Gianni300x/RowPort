@@ -169,8 +169,8 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(len(rejected), 1)
         from scripts.cli import read_csv
         with read_csv(report, postgres_csv=True) as (_, rows):
-            self.assertEqual(list(rows)[0][:3], ["-1", None, ""])
-        report.write_text(report.read_text(encoding="utf-8").replace('"-1",', '"5",', 1), encoding="utf-8")
+            self.assertEqual(list(rows)[0][:3], ["'-1", None, ""])
+        report.write_text(report.read_text(encoding="utf-8").replace("\"'-1\",", '"5",', 1), encoding="utf-8")
         retry_report = Path(self.directory.name) / "postgres-retry.csv"
         retried = subprocess.run([*base, "retry", str(report), "--schema", self.schema, "--table", "copy_target",
                                   "--dsn", DSN, "--postgres-csv", "--rejects", str(retry_report)],
@@ -222,6 +222,56 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.count(), 4)
         with next_report.open(encoding="utf-8", newline="") as f:
             self.assertEqual(list(csv.DictReader(f)), [])
+
+    def test_formula_safe_report_retry_restores_original_values(self):
+        with psycopg.connect(DSN) as conn:
+            conn.execute(sql.SQL('CREATE TABLE {}.formula_target ("=name" text, amount integer)').format(sql.Identifier(self.schema)))
+        source = Path(self.directory.name) / "formula.csv"
+        values = ["=1+2", "+SUM(1,2)", "-42", "@name", "  =1+2", "'=literal", "'normal", "normal", "\tvalue"]
+        with source.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["=name", "amount"])
+            writer.writerows((value, "bad") for value in values)
+        report = Path(self.directory.name) / "formula-rejects.csv"
+        common = ["--dsn", DSN, "--schema", self.schema, "--table", "formula_target"]
+        initial = subprocess.run([sys.executable, "-m", "scripts.cli", str(source), *common, "--rejects", str(report)],
+                                 cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(initial.returncode, 0, initial.stderr)
+        with report.open(encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            fields, rows = reader.fieldnames, list(reader)
+        self.assertEqual(fields[0], "'=name")
+        self.assertEqual(len(rows), len(values))
+        self.assertTrue(all(row["'=name"].startswith("'") for row in rows[:-2]))
+        for row in rows:
+            row["amount"] = "10"
+        with report.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        retry = subprocess.run([sys.executable, "-m", "scripts.cli", "retry", str(report), *common,
+                                "--rejects", str(Path(self.directory.name) / "again.csv")],
+                               cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        with psycopg.connect(DSN) as conn:
+            saved = conn.execute(sql.SQL('SELECT "=name" FROM {}.formula_target ORDER BY ctid').format(sql.Identifier(self.schema))).fetchall()
+        self.assertEqual([row[0] for row in saved], values)
+
+    def test_legacy_three_column_report_retry_preserves_apostrophe(self):
+        with psycopg.connect(DSN) as conn:
+            conn.execute(sql.SQL("CREATE TABLE {}.legacy_target (value text)").format(sql.Identifier(self.schema)))
+        report = Path(self.directory.name) / "legacy.csv"
+        with report.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["value", "rowport_record", "rowport_error", "rowport_extra"])
+            writer.writerow(["'=literal", 2, "old error", ""])
+        retried = subprocess.run([sys.executable, "-m", "scripts.cli", "retry", str(report), "--dsn", DSN,
+                                  "--schema", self.schema, "--table", "legacy_target", "--rejects",
+                                  str(Path(self.directory.name) / "new.csv")], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        with psycopg.connect(DSN) as conn:
+            value = conn.execute(sql.SQL("SELECT value FROM {}.legacy_target").format(sql.Identifier(self.schema))).fetchone()[0]
+        self.assertEqual(value, "'=literal")
 
     def test_postgres_copy_single_column_null_roundtrip(self):
         with psycopg.connect(DSN) as conn:

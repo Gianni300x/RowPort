@@ -91,7 +91,8 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
     saved = 0
     skipped = 0
     writer = csv.writer(report)
-    writer.writerow([*report_headers, *report_metadata_headers(report_headers)])
+    writer.writerow([*(spreadsheet_escape(value) for value in report_headers),
+                     *report_metadata_headers(report_headers, safe=True)])
     for number, row in enumerate(rows, start=2):
         if len(row) != len(headers):
             reason = f"Expected {len(headers)} values; got {len(row)}."
@@ -134,10 +135,33 @@ def show_progress(processed, saved, rejected, skipped=0):
     print(message, flush=True)
 
 
-def report_metadata_headers(headers):
+REPORT_ENCODING = "rowport-spreadsheet-v1"
+
+
+def spreadsheet_escape(value):
+    """Prefix text that a spreadsheet might interpret as a formula."""
+    if not isinstance(value, str) or not value:
+        return value
+    if value.startswith(("'", "\t", "\r", "\n")) or value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def spreadsheet_unescape(value):
+    if isinstance(value, str) and value.startswith("'"):
+        original = value[1:]
+        if spreadsheet_escape(original) == value:
+            return original
+    return value
+
+
+def report_metadata_headers(headers, safe=False):
     used = set(headers)
     result = []
-    for base in ("rowport_record", "rowport_error", "rowport_extra"):
+    names = ("rowport_record", "rowport_error", "rowport_extra")
+    if safe:
+        names += ("rowport_encoding",)
+    for base in names:
         name = base
         while name in used:
             name += "_"
@@ -147,24 +171,35 @@ def report_metadata_headers(headers):
 
 
 def retry_headers(headers):
+    # New reports use reversible spreadsheet escaping; older reports remain valid.
+    if len(headers) >= 5:
+        original = [spreadsheet_unescape(value) for value in headers[:-4]]
+        if headers[-4:] == report_metadata_headers(original, safe=True):
+            return original, True
     original = headers[:-3]
-    if len(headers) < 4 or headers[-3:] != report_metadata_headers(original):
-        raise InputError("Not a RowPort rejection report: expected its three diagnostic columns at the end.")
-    return original
+    if len(headers) >= 4 and headers[-3:] == report_metadata_headers(original):
+        return original, False
+    raise InputError("Not a RowPort rejection report: expected its diagnostic columns at the end.")
 
 
-def retry_rows(rows, column_count):
+def retry_rows(rows, column_count, safe=False):
+    metadata_count = 4 if safe else 3
     for row in rows:
-        if len(row) != column_count + 3:
+        if len(row) != column_count + metadata_count:
             raise InputError("Invalid rejection report row. Keep all original and diagnostic columns when retrying.")
-        if row[-1]:
+        if safe and row[-1] != REPORT_ENCODING:
+            raise InputError("Invalid report encoding marker. Keep the rowport_encoding column unchanged.")
+        if row[column_count + 2]:
             raise InputError("A rejected row has extra fields. Move their values into the original columns and clear the rowport_extra column before retrying.")
-        yield row[:-3]
+        original = row[:column_count]
+        yield [spreadsheet_unescape(value) for value in original] if safe else original
 
 
 def write_rejection(report, number, row, reason, column_count, postgres_csv=False):
     extra = json.dumps(row[column_count:], ensure_ascii=False) if len(row) > column_count else ""
-    fields = [*row[:column_count], *([None if postgres_csv else ""] * max(0, column_count - len(row))), number, reason, extra]
+    fields = [*(spreadsheet_escape(value) for value in row[:column_count]),
+              *([None if postgres_csv else ""] * max(0, column_count - len(row))),
+              number, reason, extra, REPORT_ENCODING]
     if not postgres_csv:
         csv.writer(report).writerow(fields)
         return

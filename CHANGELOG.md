@@ -31,6 +31,9 @@ All notable changes to RowPort are documented in this file.
 
 ### Changed
 
+- Escape formula-like report values for spreadsheets while preserving values on retry.
+- Protect common rejection report paths and use the ignored reports directory in examples.
+
 - Explain common rejected-row errors and retain the PostgreSQL details.
 - Add a database connection walkthrough and a worked correction and retry example.
 
