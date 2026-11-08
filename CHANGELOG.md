@@ -26,5 +26,7 @@ All notable changes to RowPort are documented in this file.
 
 ### Changed
 
+- Simplify the README's getting-started path and group CLI help by purpose.
+- Explain common file, connection, CSV and column errors with actionable hints.
 - License RowPort under the MIT License instead of GPL-3.0-or-later.
 - Read CSV rows incrementally and stage rejections on disk to limit memory use.

@@ -36,6 +36,17 @@ class Connection:
 
 
 class RowPortTests(unittest.TestCase):
+    def test_help_groups_options_by_purpose(self):
+        for argv, expected in [(["--help"], ["Required for import", "Database connection", "CSV format and columns", "Import behavior"]),
+                               (["validate", "--help"], ["Database and table", "CSV format and columns"]),
+                               (["preview", "--help"], ["CSV format and columns", "Preview"] )]:
+            output = io.StringIO()
+            with self.subTest(argv=argv), redirect_stdout(output), self.assertRaises(SystemExit) as result:
+                main(argv)
+            self.assertEqual(result.exception.code, 0)
+            for title in expected:
+                self.assertIn(title, output.getvalue())
+
     def test_encoding_must_be_supported_for_text(self):
         self.assertEqual(csv_encoding("latin-1"), "latin-1")
         for value in ("not-a-real-encoding", "base64_codec", ""):
@@ -177,7 +188,30 @@ class RowPortTests(unittest.TestCase):
                                "--rejects", str(Path(directory) / "out.csv")])
             self.assertEqual(result, 1)
             self.assertNotIn("Rows saved:", stdout.getvalue())
-            self.assertIn("lost", stderr.getvalue())
+            self.assertIn("connection was lost", stderr.getvalue())
+
+    def test_connection_error_does_not_expose_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.csv"
+            source.write_text("a\nok\n", encoding="utf-8")
+            stderr = io.StringIO()
+            with patch("scripts.cli.psycopg.connect", side_effect=psycopg.OperationalError("password=secret")), \
+                 redirect_stderr(stderr):
+                result = main([str(source), "--dsn", "postgresql://user:secret@localhost/db", "--table", "t",
+                               "--rejects", str(Path(directory) / "out.csv")])
+            self.assertEqual(result, 1)
+            self.assertNotIn("secret", stderr.getvalue())
+            self.assertIn("Check that PostgreSQL is running", stderr.getvalue())
+
+    def test_preview_reports_missing_file_with_suggestion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "missing.csv"
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = main(["preview", str(source)])
+            self.assertEqual(result, 1)
+            self.assertIn(str(source), stderr.getvalue())
+            self.assertIn("Check the path", stderr.getvalue())
 
     def test_report_failure_is_reported_after_commit(self):
         with tempfile.TemporaryDirectory() as directory:

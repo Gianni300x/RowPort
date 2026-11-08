@@ -37,7 +37,7 @@ def database_url(path=Path(".env")):
 
 def csv_delimiter(value):
     if len(value) != 1 or value in "\r\n\0\"":
-        raise argparse.ArgumentTypeError("Delimiter must be one character other than a quote, newline, or NUL.")
+        raise argparse.ArgumentTypeError("Delimiter must be one character other than a quote, newline, or NUL; for example, --delimiter ';'.")
     return value
 
 
@@ -46,7 +46,7 @@ def csv_encoding(value):
         with io.TextIOWrapper(io.BytesIO(), encoding=value):
             pass
     except (LookupError, ValueError):
-        raise argparse.ArgumentTypeError(f"Unknown or unsupported text encoding: {value}") from None
+        raise argparse.ArgumentTypeError(f"Unknown or unsupported text encoding: {value}. Try --encoding utf-8-sig or --encoding latin-1.") from None
     return value
 
 
@@ -80,7 +80,7 @@ def table_columns(conn, schema, table):
 
 def validate_headers(headers, columns):
     if not columns:
-        raise InputError("The table does not exist, is unsupported, or has no insertable columns.")
+        raise InputError("The table does not exist, is unsupported, or has no insertable columns. Check --table and --schema, and that the table has insertable columns.")
     known = {name for name, _ in columns}
     unknown = set(headers) - known
     missing = {name for name, required in columns if required} - set(headers)
@@ -90,7 +90,28 @@ def validate_headers(headers, columns):
     if missing:
         errors.append("Missing required columns: " + ", ".join(sorted(missing)))
     if errors:
-        raise InputError("; ".join(errors))
+        raise InputError("; ".join(errors) + ". Check the CSV headers and table columns, or use --map CSV_COLUMN=TABLE_COLUMN.")
+
+
+def display_error(exc):
+    if (isinstance(exc, psycopg.OperationalError)
+            and (not exc.sqlstate or exc.sqlstate.startswith(("08", "28", "57P")))):
+        message = ("Could not connect to PostgreSQL or the connection was lost. "
+                   "Check that PostgreSQL is running and verify the host, port, database and credentials.")
+    elif isinstance(exc, psycopg.Error) and not exc.sqlstate:
+        message = "Database operation failed. Check the connection settings and PostgreSQL availability."
+    elif isinstance(exc, FileNotFoundError):
+        message = f"File not found: {exc.filename}. Check the path and current directory."
+    elif isinstance(exc, PermissionError):
+        message = f"Permission denied: {exc.filename}. Check access to the file or directory."
+    elif isinstance(exc, UnicodeDecodeError):
+        message = (f"Could not decode the CSV using {exc.encoding}. "
+                   "Check the file encoding or specify it with --encoding, for example --encoding latin-1.")
+    elif isinstance(exc, csv.Error):
+        message = f"Invalid CSV: {exc}. Check the delimiter and quoted fields."
+    else:
+        message = str(exc)
+    print(f"Error: {message}", file=sys.stderr)
 
 
 def map_headers(headers, mappings):
@@ -162,13 +183,15 @@ def positive_int(value):
 
 
 def preview_main(argv):
-    parser = argparse.ArgumentParser(prog="rowport preview", description="Preview CSV rows without connecting to PostgreSQL.")
+    parser = argparse.ArgumentParser(prog="rowport preview", usage="%(prog)s CSV [options]", description="Preview CSV rows without connecting to PostgreSQL.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
-    parser.add_argument("--config", type=Path, help="JSON configuration file")
-    parser.add_argument("--delimiter", type=csv_delimiter, default=",")
-    parser.add_argument("--encoding", type=csv_encoding, default="utf-8-sig")
-    parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN")
-    parser.add_argument("--limit", type=positive_int, default=5, help="Maximum rows to display (default: 5)")
+    settings = parser.add_argument_group("Configuration")
+    settings.add_argument("--config", type=Path, help="JSON configuration file")
+    csv_options = parser.add_argument_group("CSV format and columns")
+    csv_options.add_argument("--delimiter", type=csv_delimiter, default=",", help="CSV delimiter (default: comma)")
+    csv_options.add_argument("--encoding", type=csv_encoding, default="utf-8-sig", help="CSV encoding (default: UTF-8)")
+    csv_options.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map CSV columns to table columns")
+    parser.add_argument_group("Preview").add_argument("--limit", type=positive_int, default=5, help="Maximum rows to display (default: 5)")
     apply_config(parser, argv, {"delimiter", "encoding", "map"})
     args = parser.parse_args(argv)
     try:
@@ -181,7 +204,7 @@ def preview_main(argv):
             for number, row in enumerate(itertools.islice(rows, args.limit), start=2):
                 print(f"{number}: {json.dumps(row, ensure_ascii=False)}")
     except (OSError, UnicodeError, csv.Error, InputError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        display_error(exc)
         return 1
     print("Preview only: no database connection or inserts.")
     return 0
@@ -267,15 +290,18 @@ def write_report(path, report):
 
 
 def validation_main(argv):
-    parser = argparse.ArgumentParser(prog="rowport validate", description="Check CSV headers against an existing PostgreSQL table without importing rows.")
+    parser = argparse.ArgumentParser(prog="rowport validate", usage="%(prog)s CSV [options]", description="Check CSV headers against an existing PostgreSQL table without importing rows.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
-    parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
-    parser.add_argument("--table", help="Table name")
-    parser.add_argument("--config", type=Path, help="JSON configuration file")
-    parser.add_argument("--schema", default="public", help="Schema (default: public)")
-    parser.add_argument("--delimiter", type=csv_delimiter, default=",", help="CSV delimiter (default: comma)")
-    parser.add_argument("--encoding", type=csv_encoding, default="utf-8-sig", help="Input CSV encoding (default: UTF-8, with optional BOM)")
-    parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
+    target = parser.add_argument_group("Database and table")
+    target.add_argument("--table", help="Table name (required unless set in --config)")
+    target.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
+    target.add_argument("--schema", default="public", help="Schema (default: public)")
+    settings = parser.add_argument_group("Configuration")
+    settings.add_argument("--config", type=Path, help="JSON configuration file")
+    csv_options = parser.add_argument_group("CSV format and columns")
+    csv_options.add_argument("--delimiter", type=csv_delimiter, default=",", help="CSV delimiter (default: comma)")
+    csv_options.add_argument("--encoding", type=csv_encoding, default="utf-8-sig", help="Input CSV encoding (default: UTF-8, with optional BOM)")
+    csv_options.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
     apply_config(parser, argv, {"table", "schema", "delimiter", "encoding", "map"})
     args = parser.parse_args(argv)
     if not args.table:
@@ -297,7 +323,7 @@ def validation_main(argv):
                 print("Required columns: " + (", ".join(name for name, required in columns if required) or "(none)"))
             validate_headers(mapped, columns)
     except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        display_error(exc)
         return 1
     print("Headers are compatible. No rows were checked or imported.")
     return 0
@@ -309,19 +335,24 @@ def main(argv=None):
         return validation_main(argv[1:])
     if argv and argv[0] == "preview" and (len(argv) == 1 or argv[1] == "--help" or not argv[1].startswith("-")):
         return preview_main(argv[1:])
-    parser = argparse.ArgumentParser(description="Import a CSV into an existing PostgreSQL table.")
+    parser = argparse.ArgumentParser(usage="%(prog)s CSV [options]", description="Import a CSV into an existing PostgreSQL table.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
-    parser.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
-    parser.add_argument("--table", help="Table name")
-    parser.add_argument("--config", type=Path, help="JSON configuration file")
-    parser.add_argument("--schema", default="public", help="Schema (default: public)")
-    parser.add_argument("--delimiter", type=csv_delimiter, default=",", help="CSV delimiter (default: comma)")
-    parser.add_argument("--encoding", type=csv_encoding, default="utf-8-sig", help="Input CSV encoding (default: UTF-8, with optional BOM)")
-    parser.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
-    parser.add_argument("--rejects", type=Path, help="Rejected rows CSV file")
-    parser.add_argument("--skip-duplicates", action=argparse.BooleanOptionalAction, default=False, help="Skip unique constraint violations on the target table")
-    parser.add_argument("--empty-as-null", action=argparse.BooleanOptionalAction, default=False, help="Insert empty CSV fields as SQL NULL")
-    parser.add_argument("--dry-run", action="store_true", help="Test import and roll back inserted rows")
+    essential = parser.add_argument_group("Required for import", "These can also be supplied by --config.")
+    essential.add_argument("--table", help="Existing PostgreSQL table")
+    essential.add_argument("--rejects", type=Path, help="Rejected rows CSV file")
+    target = parser.add_argument_group("Database connection")
+    target.add_argument("--dsn", help="PostgreSQL connection string (overrides DATABASE_URL)")
+    target.add_argument("--schema", default="public", help="Schema (default: public)")
+    settings = parser.add_argument_group("Configuration")
+    settings.add_argument("--config", type=Path, help="JSON configuration file")
+    csv_options = parser.add_argument_group("CSV format and columns")
+    csv_options.add_argument("--delimiter", type=csv_delimiter, default=",", help="CSV delimiter (default: comma)")
+    csv_options.add_argument("--encoding", type=csv_encoding, default="utf-8-sig", help="Input CSV encoding (default: UTF-8, with optional BOM)")
+    csv_options.add_argument("--map", action="append", default=[], metavar="CSV_COLUMN=TABLE_COLUMN", help="Map a CSV column to a table column; repeat as needed")
+    behavior = parser.add_argument_group("Import behavior")
+    behavior.add_argument("--skip-duplicates", action=argparse.BooleanOptionalAction, default=False, help="Skip unique constraint violations on the target table")
+    behavior.add_argument("--empty-as-null", action=argparse.BooleanOptionalAction, default=False, help="Insert empty CSV fields as SQL NULL")
+    behavior.add_argument("--dry-run", action="store_true", help="Test import and roll back inserted rows")
     parser.epilog = "Check headers: rowport validate CSV --table TABLE. Preview rows: rowport preview CSV."
     apply_config(parser, argv, set(CONFIG_FIELDS))
     args = parser.parse_args(argv)
@@ -330,7 +361,7 @@ def main(argv=None):
     try:
         dsn = args.dsn or database_url()
     except (OSError, UnicodeError) as exc:
-        print(f"Error reading .env: {exc}", file=sys.stderr)
+        display_error(exc)
         return 1
     if not dsn:
         parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
@@ -358,7 +389,7 @@ def main(argv=None):
                 print(f"{message}, but could not write the report: {exc}", file=sys.stderr)
                 return 1
     except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        display_error(exc)
         return 1
     summary = (f"Dry run: rows that would be saved: {saved}. Rows rejected: {rejected}."
                if args.dry_run else f"Rows saved: {saved}. Rows rejected: {rejected}.")

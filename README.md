@@ -2,6 +2,25 @@
 
 RowPort is a Python CLI that imports CSV files into an existing PostgreSQL table. It saves valid rows and writes rejected rows with their reasons to a CSV report.
 
+## Start here
+
+Once RowPort is installed and connected to PostgreSQL, a basic import needs only
+your CSV, an existing table, and a path for rejected rows:
+
+```sh
+rowport data.csv --table products --rejects rejects.csv
+```
+
+Valid rows are inserted into `products`; invalid rows and their reasons are
+written to `rejects.csv`. RowPort prints progress and a final summary. By
+default, the CSV uses UTF-8 and comma-separated column names that match the
+table. [Set up your database and run an example](#usage), or try the
+[Docker demo](#quick-demo-with-docker) first.
+
+Need to change how a file is read, preview it, or test without committing rows?
+See [more ways to use RowPort](#more-ways-to-use-rowport). You do not need to
+configure those options for a basic import.
+
 ## Quick demo with Docker
 
 ![Accelerated recording of a RowPort import](docs/rowport-demo.gif)
@@ -49,39 +68,30 @@ The `.env` file is ignored by Git because it can contain credentials. Use a sing
 line `DATABASE_URL=...` (optionally surrounded by single or double quotes). If a
 username or password contains special URL characters, percent-encode them.
 
-Create the example table in your database using `examples/properties.sql`, then run:
+Create the example table in your database using `examples/properties.sql`.
+For example, with `psql`, replace the user and database names below with yours
+(add `-p PORT` if PostgreSQL uses a non-default port):
+
+```sh
+psql -h localhost -U your_user -d your_database -f examples/properties.sql
+```
+
+Then import the example CSV:
 
 ```sh
 rowport examples/properties.csv --table properties --rejects rejects.csv
 ```
 
+Open `rejects.csv` to see the rejected row and its reason. For your own CSV,
+replace the file and table names; the destination table must already exist.
+
 The connection can also be supplied as an environment variable or with `--dsn`.
 The order of precedence is `--dsn`, the `DATABASE_URL` environment variable,
 then `DATABASE_URL` in `.env`. The table must already exist. The default schema is `public`; use `--schema` to select another. See `rowport --help` for all options.
 
-### Command options at a glance
+## More ways to use RowPort
 
-Both import and `validate` require a CSV file path as a positional argument.
-The table below summarizes the options for each command:
-
-| Option | Available for | Default or requirement | What it does |
-| --- | --- | --- | --- |
-| `--table TABLE` | Import, validate | Required, unless supplied by `--config` | Selects the existing PostgreSQL table. |
-| `--rejects FILE` | Import | Required, unless supplied by `--config` | Writes rejected rows and their reasons to a CSV report. |
-| `--dsn CONNECTION` | Import, validate | `DATABASE_URL` environment variable, then `.env` | Sets the PostgreSQL connection string and overrides `DATABASE_URL`. |
-| `--schema SCHEMA` | Import, validate | `public` | Selects the schema containing the target table. |
-| `--config FILE` | Import, validate, preview | None | Loads reusable options from a JSON file. |
-| `--delimiter CHAR` | Import, validate, preview | Comma (`,`) | Sets the input CSV delimiter, for example `--delimiter ';'`. |
-| `--encoding NAME` | Import, validate, preview | UTF-8 (optional BOM) | Sets the input CSV encoding, for example `--encoding latin-1`. |
-| `--map CSV_COLUMN=TABLE_COLUMN` | Import, validate, preview | CSV and table column names must match | Maps a CSV column to a table column; repeat the option for multiple columns. |
-| `--skip-duplicates` | Import | Off; unique violations are rejected | Skips eligible unique-constraint conflicts and counts them separately. |
-| `--empty-as-null` | Import | Off; empty fields are sent as empty strings | Sends empty fields as SQL `NULL`. |
-| `--no-skip-duplicates`, `--no-empty-as-null` | Import | — | Override the corresponding enabled JSON configuration option. |
-| `--dry-run` | Import | Off | Tests insertion and rolls back the transaction. |
-| `--limit N` | Preview | 5 rows | Limits the number of rows displayed. |
-| `-h`, `--help` | Import, validate, preview | — | Displays help for the selected command. |
-
-Run `rowport --help`, `rowport validate --help`, or `rowport preview --help` for command help.
+The basic import above works with the defaults. Use the options below only when your file or workflow needs them. For a compact reference, see [all command options](#command-options-at-a-glance).
 
 ### Preview rows
 
@@ -171,6 +181,8 @@ rows, skipped duplicates if enabled, and the report path. The result reflects
 the database state during that run; a later import can differ if data or
 constraints change. Without `--dry-run`, valid rows are committed as usual.
 
+### Validate table columns
+
 To check headers before importing, use:
 
 ```sh
@@ -182,6 +194,8 @@ It reports missing required or unknown columns and exits with a nonzero status
 on errors. It does not examine row data or check types and constraints, and it
 does not insert anything. Use `--schema` or `--dsn` when needed; the connection
 configuration follows the same precedence as the import command.
+
+### Match CSV columns to table columns
 
 When CSV headers differ from the table's column names, use `--map` for each
 equivalence. Names are case-sensitive and must match exactly; quote arguments
@@ -195,6 +209,8 @@ rowport properties.csv --table properties --map street=address --map bedrooms=ro
 
 Mappings must reference existing CSV columns and distinct insertable table
 columns. Rejected rows retain their original CSV values and column order.
+
+### Choose the CSV format
 
 For CSV files using a different delimiter, pass a single character with
 `--delimiter` to either validation or import. The default is a comma:
@@ -220,6 +236,8 @@ and match insertable table columns. Columns marked `NOT NULL` without a default
 or identity are required; unknown columns prevent the import. Empty values are
 sent as empty strings, not `NULL`, unless `--empty-as-null` is used.
 
+### Insert empty fields as NULL
+
 To insert empty fields as SQL `NULL` instead, use:
 
 ```sh
@@ -230,6 +248,8 @@ Both quoted and unquoted empty fields become `NULL`; whitespace-only values are
 unchanged. PostgreSQL still rejects `NULL` in a `NOT NULL` column. An explicitly
 supplied `NULL` does not cause a column default to be applied. Rejected rows
 retain their original CSV values in the report.
+
+### Understand the import results
 
 PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the CSV record number (header = 1), the original row encoded as CSV, and the rejection reason. It is written even when there are no rejected rows and overwrites the selected output file. If writing the report fails after commit, the CLI reports that rows were already saved.
 
@@ -244,6 +264,8 @@ Rows saved: 199996. Rows rejected: 4. Report: rejects.csv
 Rejection summary:
   Invalid data: 4
 ```
+
+### Skip duplicate keys
 
 By default, unique constraint violations are rejected like other invalid rows.
 To skip violations reported on the target table instead, use:
@@ -277,6 +299,41 @@ printed after the transaction commits and the report is written. Progress uses
 separate, immediately flushed stdout lines, so it remains readable in Docker
 logs and when redirected to a file. Errors go to stderr; use `> import.log 2>&1`
 to capture both streams.
+
+### Command options at a glance
+
+Both import and `validate` require a CSV file path as a positional argument.
+The table below summarizes the options for each command:
+
+| Option | Available for | Default or requirement | What it does |
+| --- | --- | --- | --- |
+| `--table TABLE` | Import, validate | Required, unless supplied by `--config` | Selects the existing PostgreSQL table. |
+| `--rejects FILE` | Import | Required, unless supplied by `--config` | Writes rejected rows and their reasons to a CSV report. |
+| `--dsn CONNECTION` | Import, validate | `DATABASE_URL` environment variable, then `.env` | Sets the PostgreSQL connection string and overrides `DATABASE_URL`. |
+| `--schema SCHEMA` | Import, validate | `public` | Selects the schema containing the target table. |
+| `--config FILE` | Import, validate, preview | None | Loads reusable options from a JSON file. |
+| `--delimiter CHAR` | Import, validate, preview | Comma (`,`) | Sets the input CSV delimiter, for example `--delimiter ';'`. |
+| `--encoding NAME` | Import, validate, preview | UTF-8 (optional BOM) | Sets the input CSV encoding, for example `--encoding latin-1`. |
+| `--map CSV_COLUMN=TABLE_COLUMN` | Import, validate, preview | CSV and table column names must match | Maps a CSV column to a table column; repeat the option for multiple columns. |
+| `--skip-duplicates` | Import | Off; unique violations are rejected | Skips eligible unique-constraint conflicts and counts them separately. |
+| `--empty-as-null` | Import | Off; empty fields are sent as empty strings | Sends empty fields as SQL `NULL`. |
+| `--no-skip-duplicates`, `--no-empty-as-null` | Import | — | Override the corresponding enabled JSON configuration option. |
+| `--dry-run` | Import | Off | Tests insertion and rolls back the transaction. |
+| `--limit N` | Preview | 5 rows | Limits the number of rows displayed. |
+| `-h`, `--help` | Import, validate, preview | — | Displays help for the selected command. |
+
+Run `rowport --help`, `rowport validate --help`, or `rowport preview --help` for command help.
+
+### Common problems
+
+- **File not found:** check the file path and the directory where you ran the command.
+- **Connection failed:** check that PostgreSQL is running and verify the host, port, database and credentials in your connection settings. Connection errors do not print the underlying error, which can contain credentials.
+- **Table or columns not found:** check `--table` and `--schema`, then compare the CSV headers with the table or use `--map`.
+- **Cannot decode the file:** verify its encoding and pass `--encoding`, for example `--encoding latin-1`.
+- **Malformed CSV:** check the input delimiter and quoting; use `--delimiter` if the file is not comma-separated.
+
+For database errors other than connection failures, RowPort reports the database
+error message. Per-row errors are detailed in the rejection report.
 
 ## Tests
 

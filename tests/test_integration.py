@@ -199,6 +199,7 @@ class IntegrationTests(unittest.TestCase):
         bad = subprocess.run([sys.executable, "-m", "scripts.cli", *common, "--rejects", str(report)],
                              cwd=ROOT, capture_output=True, text=True)
         self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("--encoding", bad.stderr)
         self.assertEqual(self.count(), 0)
         self.assertFalse(report.exists())
         validation = subprocess.run([sys.executable, "-m", "scripts.cli", "validate", *common,
