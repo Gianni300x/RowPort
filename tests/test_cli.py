@@ -1,6 +1,7 @@
 import argparse
 import csv
 import io
+import random
 import tempfile
 import unittest
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 import psycopg
 
-from scripts.cli import InputError, csv_delimiter, csv_encoding, database_url, import_rows, main, map_headers, read_csv, show_progress, validate_headers, write_report
+from scripts.cli import InputError, csv_delimiter, csv_encoding, database_url, import_rows, main, map_headers, read_csv, show_progress, staged_report, validate_headers, write_report
 
 
 class Connection:
@@ -116,21 +117,87 @@ class RowPortTests(unittest.TestCase):
                 with self.assertRaises(csv.Error):
                     next(rows)
 
+    def test_postgres_csv_distinguishes_null_and_quoted_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "postgres.csv"
+            source.write_text('a;b;c;d;e\r\n;"";" ";"line 1\nline ""2""";end\r\n"";;x;;\r\n', encoding="utf-8", newline="")
+            with read_csv(source, delimiter=";", postgres_csv=True) as (headers, rows):
+                self.assertEqual(headers, ["a", "b", "c", "d", "e"])
+                self.assertEqual(list(rows), [[None, "", " ", 'line 1\nline "2"', "end"],
+                                             ["", None, "x", None, None]])
+
+    def test_postgres_csv_single_column_empty_line_is_null(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "single.csv"
+            source.write_text('value\n\n""\n', encoding="utf-8")
+            with read_csv(source, postgres_csv=True) as (_, rows):
+                self.assertEqual(list(rows), [[None], [""]])
+
+    def test_postgres_csv_many_mixed_quoting_patterns(self):
+        rng = random.Random(42)
+        values = [None, "", "normal", " ", "a,b", 'a"b', "line\nnext", "carriage\rreturn", "Ñandú 🧉"]
+        expected = [[rng.choice(values) for _ in range(4)] for _ in range(1000)]
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "mixed.csv"
+            with source.open("w", encoding="utf-8", newline="") as target:
+                target.write("a,b,c,d\r\n")
+                for row in expected:
+                    fields = []
+                    for value in row:
+                        if value is None:
+                            fields.append("")
+                        else:
+                            buffer = io.StringIO(newline="")
+                            quoting = csv.QUOTE_ALL if rng.choice((True, False)) else csv.QUOTE_MINIMAL
+                            csv.writer(buffer, quoting=quoting, lineterminator="\r\n").writerow([value])
+                            fields.append(buffer.getvalue()[:-2])
+                    target.write(",".join(fields) + "\r\n")
+            with read_csv(source, postgres_csv=True) as (_, rows):
+                self.assertEqual(list(rows), expected)
+
+    def test_postgres_csv_and_empty_as_null_are_incompatible(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as result:
+            main(["file.csv", "--table", "t", "--rejects", "out.csv", "--postgres-csv", "--empty-as-null"])
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn("cannot be combined", stderr.getvalue())
+
+    def test_postgres_csv_config_can_be_overridden_for_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.csv"
+            config = Path(directory) / "config.json"
+            source.write_text('value\n\n""\n', encoding="utf-8")
+            config.write_text('{"postgres_csv": true}', encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["preview", str(source), "--config", str(config)]), 0)
+            self.assertIn('2: [null]', output.getvalue())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(["preview", str(source), "--config", str(config), "--no-postgres-csv"]), 0)
+            self.assertIn('2: []', output.getvalue())
+
     def test_rows_and_report_keep_invalid_and_irregular_values(self):
         conn = Connection()
-        report = io.StringIO(newline="")
-        saved, rejected, skipped = import_rows(conn, "public", "properties", ["a", "b"],
-                                      iter([["ok", "1"], ["invalid", "2"], ["extra", "3", "4"]]), report)
-        self.assertEqual(saved, 1)
-        self.assertEqual(rejected, 2)
-        self.assertEqual(skipped, 0)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rejected.csv"
-            write_report(path, report)
+            with staged_report(path) as (target, report):
+                saved, rejected, skipped = import_rows(conn, "public", "properties", ["a", "b"],
+                                              iter([["ok", "1"], ["invalid", "2"], ["extra", "3", "4"]]), report)
+                self.assertEqual((saved, rejected, skipped), (1, 2, 0))
+                write_report(target, report)
             with path.open(encoding="utf-8", newline="") as report:
                 records = list(csv.reader(report))
             self.assertEqual([int(row[0]) for row in records[1:]], [3, 4])
             self.assertEqual(list(csv.reader([records[2][1]]))[0], ["extra", "3", "4"])
+
+    def test_subcommands_accept_options_before_csv(self):
+        source = Path(__file__).resolve().parent.parent / "examples" / "properties.csv"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = main(["preview", "--limit", "1", str(source)])
+        self.assertEqual(result, 0)
+        self.assertIn('2: ["123 Oak Avenue", "85000", "3"]', output.getvalue())
 
     def test_database_failure_is_not_treated_as_row_rejection(self):
         conn = Connection(psycopg.OperationalError("connection lost"))
@@ -226,6 +293,25 @@ class RowPortTests(unittest.TestCase):
                 self.assertEqual(main([str(source), "--dsn", "test", "--table", "t",
                                        "--rejects", str(Path(directory) / "out.csv")]), 1)
             self.assertIn("Saved 1 rows, but could not write the report", stderr.getvalue())
+
+    def test_failed_report_replacement_preserves_existing_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.csv"
+            destination = Path(directory) / "out.csv"
+            source.write_text("a\nok\n", encoding="utf-8")
+            destination.write_text("previous report", encoding="utf-8")
+            conn = Connection()
+            stderr = io.StringIO()
+            with patch("scripts.cli.psycopg.connect", return_value=conn), \
+                 patch("scripts.cli.table_columns", return_value=[("a", True)]), \
+                 patch("scripts.cli.os.replace", side_effect=OSError("rename failed")), \
+                 redirect_stderr(stderr):
+                result = main([str(source), "--dsn", "test", "--table", "t", "--rejects", str(destination)])
+            self.assertEqual(result, 1)
+            self.assertIn("Saved 1 rows, but could not write the report", stderr.getvalue())
+            self.assertEqual(destination.read_text(encoding="utf-8"), "previous report")
+            self.assertEqual(conn.executed, [["ok"]])
+            self.assertFalse(list(Path(directory).glob(".rowport-*")))
 
 
 if __name__ == "__main__":

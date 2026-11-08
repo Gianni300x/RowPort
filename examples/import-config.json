@@ -6,5 +6,6 @@
   "map": [],
   "rejects": "rejects.csv",
   "skip_duplicates": false,
-  "empty_as_null": false
+  "empty_as_null": false,
+  "postgres_csv": false
 }

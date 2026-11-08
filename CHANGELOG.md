@@ -6,6 +6,7 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
+- Add `--postgres-csv` to preserve NULL and empty text in PostgreSQL CSV exports.
 - Preview parsed CSV rows without connecting to PostgreSQL.
 - Group rejected rows by error category in the console summary.
 - Reuse import, validation and preview options from a JSON configuration file.
@@ -30,3 +31,11 @@ All notable changes to RowPort are documented in this file.
 - Explain common file, connection, CSV and column errors with actionable hints.
 - License RowPort under the MIT License instead of GPL-3.0-or-later.
 - Read CSV rows incrementally and stage rejections on disk to limit memory use.
+
+### Fixed
+
+- Protect the input and configuration from report paths pointing to the same file, including hard links.
+- Check the report destination before importing and replace reports atomically after success.
+- Exclude `GENERATED ALWAYS` identity columns from insertable-column validation.
+- Support CSV fields up to 16,777,216 characters and report the limit accurately.
+- Allow `preview` and `validate` options before the CSV path.
