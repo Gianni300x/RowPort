@@ -31,9 +31,13 @@ All notable changes to RowPort are documented in this file.
 - Explain common file, connection, CSV and column errors with actionable hints.
 - License RowPort under the MIT License instead of GPL-3.0-or-later.
 - Read CSV rows incrementally and stage rejections on disk to limit memory use.
+- Split CSV parsing, configuration, database import and shared errors into separate modules.
 
 ### Fixed
 
+- Read UTF-8 `.env` files with or without a BOM.
+- Use UTF-8 for redirected Windows output unless explicitly configured otherwise.
+- Document installation and PostgreSQL command-line setup for Windows.
 - Protect the input and configuration from report paths pointing to the same file, including hard links.
 - Check the report destination before importing and replace reports atomically after success.
 - Exclude `GENERATED ALWAYS` identity columns from insertable-column validation.
