@@ -118,5 +118,3 @@ def map_headers(headers, mappings):
     if duplicates:
         raise InputError("Multiple CSV columns map to the same table column: " + ", ".join(duplicates))
     return result
-
-

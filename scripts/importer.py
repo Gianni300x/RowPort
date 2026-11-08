@@ -161,5 +161,3 @@ def staged_report(destination):
             yield target, temporary
     finally:
         temporary_path.unlink(missing_ok=True)
-
-

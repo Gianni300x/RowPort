@@ -60,5 +60,3 @@ def apply_config(parser, argv, fields):
         parser.set_defaults(**defaults)
     except (OSError, UnicodeError, ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(f"Invalid configuration: {exc}")
-
-
