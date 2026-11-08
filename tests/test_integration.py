@@ -167,11 +167,61 @@ class IntegrationTests(unittest.TestCase):
         with report.open(encoding="utf-8", newline="") as f:
             rejected = list(csv.DictReader(f))
         self.assertEqual(len(rejected), 1)
-        encoded = Path(self.directory.name) / "encoded.csv"
-        encoded.write_text("id,first,second\n" + rejected[0]["csv_row"] + "\n", encoding="utf-8")
         from scripts.cli import read_csv
-        with read_csv(encoded, postgres_csv=True) as (_, rows):
-            self.assertEqual(list(rows), [["-1", None, ""]])
+        with read_csv(report, postgres_csv=True) as (_, rows):
+            self.assertEqual(list(rows)[0][:3], ["-1", None, ""])
+        report.write_text(report.read_text(encoding="utf-8").replace('"-1",', '"5",', 1), encoding="utf-8")
+        retry_report = Path(self.directory.name) / "postgres-retry.csv"
+        retried = subprocess.run([*base, "retry", str(report), "--schema", self.schema, "--table", "copy_target",
+                                  "--dsn", DSN, "--postgres-csv", "--rejects", str(retry_report)],
+                                 cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        with psycopg.connect(DSN) as conn:
+            values = conn.execute(sql.SQL("SELECT first, second FROM {}.copy_target WHERE id = 5")
+                                  .format(sql.Identifier(self.schema))).fetchone()
+        self.assertEqual(values, (None, ""))
+
+    def test_correct_report_and_retry_into_database(self):
+        source = Path(self.directory.name) / "original.csv"
+        source.write_text('address,price,rooms\nValid,10,1\n"Bad, Street",wrong,2\nMissing,20\nExtra,30,3,unexpected\n', encoding="utf-8")
+        result, report = self.run_cli(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with report.open(encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            headers = reader.fieldnames
+            rows = list(reader)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["address"], "Bad, Street")
+        self.assertEqual(rows[1]["rowport_record"], "4")
+        self.assertEqual(json.loads(rows[2]["rowport_extra"]), ["unexpected"])
+        rows[0]["price"] = "40"
+        rows[1]["rooms"] = "2"
+        with report.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+        failed_report = Path(self.directory.name) / "failed-retry.csv"
+        failed = subprocess.run([sys.executable, "-m", "scripts.cli", "retry", str(report), "--dsn", DSN,
+                                 "--schema", self.schema, "--table", "properties", "--rejects", str(failed_report)],
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("extra fields", failed.stderr)
+        self.assertEqual(self.count(), 1)
+        self.assertFalse(failed_report.exists())
+        rows[2]["rowport_extra"] = ""
+        with report.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+        next_report = Path(self.directory.name) / "retry-rejects.csv"
+        result = subprocess.run([sys.executable, "-m", "scripts.cli", "retry", str(report),
+                                 "--dsn", DSN, "--schema", self.schema, "--table", "properties",
+                                 "--rejects", str(next_report)], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Rows saved: 3. Rows rejected: 0.", result.stdout)
+        self.assertEqual(self.count(), 4)
+        with next_report.open(encoding="utf-8", newline="") as f:
+            self.assertEqual(list(csv.DictReader(f)), [])
 
     def test_postgres_copy_single_column_null_roundtrip(self):
         with psycopg.connect(DSN) as conn:
@@ -212,8 +262,8 @@ class IntegrationTests(unittest.TestCase):
         with report.open(encoding="utf-8", newline="") as source:
             rejected = list(csv.DictReader(source))
         self.assertEqual(len(rejected), 1)
-        self.assertIn("not a price", rejected[0]["csv_row"])
-        self.assertTrue(rejected[0]["reason"])
+        self.assertEqual(rejected[0]["price"], "not a price")
+        self.assertTrue(rejected[0]["rowport_error"])
         missing = Path(self.directory.name) / "missing.csv"
         missing.write_text("address,price\nExample,100\n", encoding="utf-8")
         result, _ = self.run_cli(missing)
@@ -241,7 +291,7 @@ class IntegrationTests(unittest.TestCase):
         with report.open(encoding="utf-8", newline="") as f:
             rejected = list(csv.DictReader(f))
         self.assertEqual(len(rejected), 1)
-        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["Bad", "invalid", "3"])
+        self.assertEqual([rejected[0][key] for key in ("street", "price", "bedrooms")] , ["Bad", "invalid", "3"])
 
         for mapping, message in [("street=missing", "Unknown columns"),
                                  ("street=price", "same table column")]:
@@ -268,7 +318,7 @@ class IntegrationTests(unittest.TestCase):
         with report.open(encoding="utf-8", newline="") as f:
             rejected = list(csv.DictReader(f))
         self.assertEqual(len(rejected), 1)
-        self.assertIn("Invalid,bad,1", rejected[0]["csv_row"])
+        self.assertEqual([rejected[0][key] for key in ("address", "price", "rooms")], ["Invalid", "bad", "1"])
 
         result = subprocess.run(common, cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -296,7 +346,7 @@ class IntegrationTests(unittest.TestCase):
         with report.open(encoding="utf-8", newline="") as f:
             rejected = list(csv.DictReader(f))
         self.assertEqual(len(rejected), 1)
-        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["Bad; Street", "invalid", "3"])
+        self.assertEqual([rejected[0][key] for key in ("street", "price", "rooms")] , ["Bad; Street", "invalid", "3"])
 
     def test_empty_as_null_is_opt_in_and_preserves_rejections(self):
         with psycopg.connect(DSN) as conn:
@@ -317,10 +367,10 @@ class IntegrationTests(unittest.TestCase):
 
         output, rejected = run("default_values", [])
         self.assertIn("Rows saved: 3. Rows rejected: 1.", output)
-        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["First", "", ""])
+        self.assertEqual([rejected[0][key] for key in ("name", "note", "amount")] , ["First", "", ""])
         output, rejected = run("null_values", ["--empty-as-null"])
         self.assertIn("Rows saved: 3. Rows rejected: 1.", output)
-        self.assertEqual(next(csv.reader([rejected[0]["csv_row"]])), ["", "comment", "9"])
+        self.assertEqual([rejected[0][key] for key in ("name", "note", "amount")] , ["", "comment", "9"])
         with psycopg.connect(DSN) as conn:
             rows = conn.execute(sql.SQL("SELECT name, note, amount FROM {}.null_values ORDER BY name")
                                 .format(sql.Identifier(self.schema))).fetchall()
@@ -350,7 +400,7 @@ class IntegrationTests(unittest.TestCase):
         with report.open(encoding="utf-8", newline="") as f:
             rejected = list(csv.DictReader(f))
         self.assertEqual(len(rejected), 1)
-        self.assertIn("Niño", rejected[0]["csv_row"])
+        self.assertIn("Niño", rejected[0]["address"])
 
     def test_config_preview_and_dry_run(self):
         source = Path(self.directory.name) / "custom.csv"

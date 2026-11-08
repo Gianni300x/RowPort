@@ -6,6 +6,10 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
+- Retry corrected rejection reports with `rowport retry`.
+
+- Display an updating percentage progress bar for interactive imports.
+
 - Add `--postgres-csv` to preserve NULL and empty text in PostgreSQL CSV exports.
 - Preview parsed CSV rows without connecting to PostgreSQL.
 - Group rejected rows by error category in the console summary.
@@ -26,6 +30,10 @@ All notable changes to RowPort are documented in this file.
 - Import CSV rows into an existing PostgreSQL table and report rejected rows.
 
 ### Changed
+
+- Give actionable guidance for common database, disk, CSV and interruption errors.
+
+- Rejection reports expose original CSV columns and diagnostic columns; this replaces the previous encoded-row format.
 
 - Simplify the README's getting-started path and group CLI help by purpose.
 - Explain common file, connection, CSV and column errors with actionable hints.

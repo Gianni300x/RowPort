@@ -96,7 +96,7 @@ def read_csv(path, delimiter=",", encoding="utf-8-sig", postgres_csv=False):
             if not headers or any(not name.strip() for name in headers):
                 raise InputError("CSV headers must not be empty.")
             if len(set(headers)) != len(headers):
-                raise InputError("The CSV contains duplicate columns.")
+                raise InputError("The CSV contains duplicate columns. Give each column a unique name in the header.")
             yield headers, postgres_rows(reader, lines, delimiter, len(headers)) if postgres_csv else reader
     finally:
         csv.field_size_limit(previous_limit)

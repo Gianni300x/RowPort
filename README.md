@@ -248,8 +248,7 @@ rowport validate properties.csv --table properties --delimiter ';'
 rowport properties.csv --table properties --delimiter ';' --rejects rejects.csv
 ```
 
-The rejection report itself uses commas, including the encoded `csv_row` field,
-regardless of the input delimiter.
+The rejection report uses commas and UTF-8 regardless of the input format.
 
 Input CSV files use UTF-8 by default (a UTF-8 BOM is accepted). For files in
 another encoding, set `--encoding` on import or validation:
@@ -299,14 +298,36 @@ exports using a custom `NULL` marker or custom quote/escape characters are not
 supported. Set `--delimiter` or `--encoding` if your export uses different
 supported values. `--postgres-csv` cannot be combined with `--empty-as-null`.
 
-In this mode, rejected rows retain the distinction in the report's `csv_row`
-field: unquoted empty fields represent `NULL`, and quoted empty fields represent
-empty text. The report and its encoded `csv_row` still use comma delimiters.
-Without `--postgres-csv`, the existing empty-field behavior is unchanged.
+In this mode, the report preserves the distinction: unquoted empty fields
+represent `NULL`, while quoted empty fields represent empty text. Use
+`--postgres-csv` again when retrying it. Spreadsheet programs may rewrite CSV
+quoting and lose this distinction; use a text editor if it matters.
 
 ### Understand the import results
 
-PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the CSV record number (header = 1), the original row encoded as CSV, and the rejection reason. RowPort checks the report destination before inserting and stages the report in the destination directory. It replaces the selected output after a successful import, even when there are no rejected rows. If publishing the report fails after commit, the CLI reports that rows were already saved and leaves any existing report in place. The report must be a different file from the input and configuration, including hard links.
+PostgreSQL validates types and constraints. Valid rows are inserted in one transaction; invalid rows are captured in the report. A database failure interrupts and rolls back the import. The report contains the original CSV columns followed by `rowport_record` (header = 1), `rowport_error`, and `rowport_extra`. If a source column already uses a diagnostic name, underscores are appended to the diagnostic name to avoid a collision. Rows with missing fields are padded with empty values; extra fields are retained as a JSON array in `rowport_extra`. This replaces the previous `row_number,csv_row,reason` report format. RowPort checks the report destination before inserting and stages the report in the destination directory. It replaces the selected output after a successful import, even when there are no rejected rows. If publishing the report fails after commit, the CLI reports that rows were already saved and leaves any existing report in place. The report must be a different file from the input and configuration, including hard links.
+
+### Correct and retry rejected rows
+
+Open the report in a CSV editor and correct the original columns. Keep the three
+diagnostic columns in place: `rowport retry` ignores them when inserting rows.
+For a row with too many fields, inspect `rowport_extra`, move any needed values
+to the original columns, and clear that cell. Fill in any missing fields. Save
+as UTF-8 CSV, preserving all columns and their order, then use a **different**
+path for the new rejection report:
+
+```sh
+rowport retry rejects.csv --table products --rejects retry-rejects.csv
+```
+
+Use the same `--schema`, column mappings and import behavior as the original
+import, if applicable. Reports use comma delimiters and UTF-8 even if the
+original file did not; `retry` reads that format regardless of `--delimiter`
+and `--encoding`. For PostgreSQL exports, keep `--postgres-csv` and preserve CSV
+quoting when editing. Previously saved rows are not in the report, so a retry
+only processes the rejected rows. Rows still invalid appear in the new report.
+Older reports in the `row_number,csv_row,reason` format cannot be retried using
+this command.
 
 When rows are rejected, the console also groups them into broad categories such
 as invalid data, unique constraints, missing required values, and incorrect
@@ -346,14 +367,21 @@ back the import instead of being skipped.
 Rows are read one at a time, and rejected rows are staged in a temporary file on
 disk until the database transaction succeeds. Memory use therefore does not grow
 with the number of rows, although disk space is needed for the rejection report.
+RowPort uses a savepoint for each row to isolate rejected values while keeping
+the import in one transaction. Network latency, database constraints, triggers,
+indexes and the number of rejected rows can affect import speed.
 
-During import, RowPort prints a progress line every 10,000 processed rows, with
-the counts processed, saved pending commit, and rejected. These counts are
-provisional: an error can roll back all pending inserts. The final summary is
-printed after the transaction commits and the report is written. Progress uses
-separate, immediately flushed stdout lines, so it remains readable in Docker
-logs and when redirected to a file. Errors go to stderr; use `> import.log 2>&1`
-to capture both streams.
+In an interactive terminal, RowPort displays a progress bar and percentage on a
+single updating line. It first reads the CSV once to count records, then reads it
+again for the import; this keeps memory usage bounded but adds a preliminary
+read for large files. The percentage counts processed rows, including rejected
+and skipped rows. Even at 100%, saved rows remain pending until the database
+transaction commits. The final summary appears after the report is written.
+
+When stdout is redirected, including typical Docker logs, or the input is not a
+regular file, RowPort instead prints a separate progress line every 10,000 rows.
+These lines are flushed immediately and include pending and rejected counts.
+Errors go to stderr; use `> import.log 2>&1` to capture both streams.
 
 On Windows, redirected stdout and stderr use UTF-8 by default so previews and
 errors can include Unicode characters. An explicitly configured
@@ -361,7 +389,8 @@ errors can include Unicode characters. An explicitly configured
 
 ### Command options at a glance
 
-Both import and `validate` require a CSV file path as a positional argument.
+Import, `retry`, and `validate` require a CSV file path as a positional argument.
+`retry` accepts import options but always reads its report as comma-separated UTF-8.
 The table below summarizes the options for each command:
 
 | Option | Available for | Default or requirement | What it does |
@@ -383,15 +412,18 @@ The table below summarizes the options for each command:
 | `--limit N` | Preview | 5 rows | Limits the number of rows displayed. |
 | `-h`, `--help` | Import, validate, preview | — | Displays help for the selected command. |
 
-Run `rowport --help`, `rowport validate --help`, or `rowport preview --help` for command help.
+Run `rowport --help`, `rowport retry --help`, `rowport validate --help`, or `rowport preview --help` for command help.
 Options for `validate` and `preview` can appear before or after the CSV path.
-To import a file literally named `validate` or `preview`, use `./validate` or
+To import a file literally named `retry`, `validate` or `preview`, use `./retry`, `./validate` or
 `./preview` so it is not interpreted as a subcommand.
 
 ### Common problems
 
 - **File not found:** check the file path and the directory where you ran the command.
 - **Connection failed:** check that PostgreSQL is running and verify the host, port, database and credentials in your connection settings. Connection errors do not print the underlying error, which can contain credentials.
+- **Access denied:** verify that the database user has the required permissions on the schema and table.
+- **Import canceled or interrupted:** check the database and report before retrying; an interruption can occur after the database commits.
+- **Disk full:** free space on the report destination and retry. If the CLI says rows were saved but the report could not be written, check the database before retrying.
 - **Table or columns not found:** check `--table` and `--schema`, then compare the CSV headers with the table or use `--map`.
 - **Cannot decode the file:** verify its encoding and pass `--encoding`, for example `--encoding latin-1`.
 - **Malformed CSV:** check the input delimiter and quoting; use `--delimiter` if the file is not comma-separated.

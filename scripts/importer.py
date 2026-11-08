@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import os
 import stat
 import tempfile
@@ -40,7 +41,7 @@ def validate_headers(headers, columns):
     if missing:
         errors.append("Missing required columns: " + ", ".join(sorted(missing)))
     if errors:
-        raise InputError("; ".join(errors) + ". Check the CSV headers and table columns, or use --map CSV_COLUMN=TABLE_COLUMN.")
+        raise InputError("; ".join(errors) + ". Check the CSV delimiter and table columns with rowport validate, or use --map CSV_COLUMN=TABLE_COLUMN.")
 
 
 def error_category(exc):
@@ -57,7 +58,8 @@ def error_category(exc):
     return "Other integrity constraint"
 
 
-def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000, skip_duplicates=False, empty_as_null=False, error_counts=None, postgres_csv=False):
+def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000, skip_duplicates=False, empty_as_null=False, error_counts=None, postgres_csv=False, report_headers=None):
+    report_headers = headers if report_headers is None else report_headers
     statement = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
         sql.Identifier(schema), sql.Identifier(table),
         sql.SQL(", ").join(map(sql.Identifier, headers)),
@@ -67,11 +69,11 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
     saved = 0
     skipped = 0
     writer = csv.writer(report)
-    writer.writerow(["row_number", "csv_row", "reason"])
+    writer.writerow([*report_headers, *report_metadata_headers(report_headers)])
     for number, row in enumerate(rows, start=2):
         if len(row) != len(headers):
             reason = f"Expected {len(headers)} values; got {len(row)}."
-            write_rejection(writer, number, row, reason, postgres_csv=postgres_csv)
+            write_rejection(report, number, row, reason, len(report_headers), postgres_csv=postgres_csv)
             rejected += 1
             if error_counts is not None:
                 error_counts["Incorrect field count"] += 1
@@ -85,12 +87,12 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
                 if skip_duplicates and exc.diag.schema_name == schema and exc.diag.table_name == table:
                     skipped += 1
                 else:
-                    write_rejection(writer, number, row, exc.diag.message_primary or str(exc), postgres_csv=postgres_csv)
+                    write_rejection(report, number, row, exc.diag.message_primary or str(exc), len(report_headers), postgres_csv=postgres_csv)
                     rejected += 1
                     if error_counts is not None:
                         error_counts[error_category(exc)] += 1
             except (psycopg.DataError, psycopg.IntegrityError) as exc:
-                write_rejection(writer, number, row, exc.diag.message_primary or str(exc), postgres_csv=postgres_csv)
+                write_rejection(report, number, row, exc.diag.message_primary or str(exc), len(report_headers), postgres_csv=postgres_csv)
                 rejected += 1
                 if error_counts is not None:
                     error_counts[error_category(exc)] += 1
@@ -110,22 +112,50 @@ def show_progress(processed, saved, rejected, skipped=0):
     print(message, flush=True)
 
 
-def write_rejection(writer, number, row, reason, postgres_csv=False):
-    if postgres_csv:
-        fields = []
-        for value in row:
-            if value is None:
-                fields.append("")
-            else:
-                buffer = io.StringIO(newline="")
-                csv.writer(buffer, quoting=csv.QUOTE_ALL, lineterminator="").writerow([value])
-                fields.append(buffer.getvalue())
-        encoded = ",".join(fields)
-    else:
-        buffer = io.StringIO(newline="")
-        csv.writer(buffer, lineterminator="").writerow(row)
-        encoded = buffer.getvalue()
-    writer.writerow([number, encoded, reason])
+def report_metadata_headers(headers):
+    used = set(headers)
+    result = []
+    for base in ("rowport_record", "rowport_error", "rowport_extra"):
+        name = base
+        while name in used:
+            name += "_"
+        used.add(name)
+        result.append(name)
+    return result
+
+
+def retry_headers(headers):
+    original = headers[:-3]
+    if len(headers) < 4 or headers[-3:] != report_metadata_headers(original):
+        raise InputError("Not a RowPort rejection report: expected its three diagnostic columns at the end.")
+    return original
+
+
+def retry_rows(rows, column_count):
+    for row in rows:
+        if len(row) != column_count + 3:
+            raise InputError("Invalid rejection report row. Keep all original and diagnostic columns when retrying.")
+        if row[-1]:
+            raise InputError("A rejected row has extra fields. Move their values into the original columns and clear the rowport_extra column before retrying.")
+        yield row[:-3]
+
+
+def write_rejection(report, number, row, reason, column_count, postgres_csv=False):
+    extra = json.dumps(row[column_count:], ensure_ascii=False) if len(row) > column_count else ""
+    fields = [*row[:column_count], *([None if postgres_csv else ""] * max(0, column_count - len(row))), number, reason, extra]
+    if not postgres_csv:
+        csv.writer(report).writerow(fields)
+        return
+    # QUOTE_ALL preserves empty text; SQL NULL is the only unquoted empty field.
+    encoded = []
+    for value in fields:
+        if value is None:
+            encoded.append("")
+        else:
+            buffer = io.StringIO(newline="")
+            csv.writer(buffer, quoting=csv.QUOTE_ALL).writerow([value])
+            encoded.append(buffer.getvalue()[:-2])
+    report.write(",".join(encoded) + "\r\n")
 
 
 def write_report(path, report):

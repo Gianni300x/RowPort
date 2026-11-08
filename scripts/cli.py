@@ -1,8 +1,10 @@
 import argparse
 import csv
+import errno
 import itertools
 import json
 import os
+import stat
 import sys
 from collections import Counter
 from pathlib import Path
@@ -12,8 +14,9 @@ import psycopg
 from .config import CONFIG_FIELDS, apply_config, database_url
 from .csv_io import CSV_FIELD_LIMIT, csv_delimiter, csv_encoding, map_headers, read_csv
 from .errors import InputError
+from .progress import ProgressBar
 from .importer import (import_rows, same_file, show_progress, staged_report,
-                       table_columns, validate_headers, write_report)
+                       table_columns, validate_headers, write_report, retry_headers, retry_rows)
 
 
 def configure_windows_output(platform=None, streams=None):
@@ -26,7 +29,18 @@ def configure_windows_output(platform=None, streams=None):
 
 
 def display_error(exc):
-    if (isinstance(exc, psycopg.OperationalError)
+    state = exc.sqlstate if isinstance(exc, psycopg.Error) else None
+    if state and state.startswith("28"):
+        message = "PostgreSQL authentication failed. Check the database user and password in your connection settings."
+    elif state == "3D000":
+        message = "PostgreSQL database was not found. Check the database name in your connection settings."
+    elif state == "42501":
+        message = "PostgreSQL denied access. Check that the database user has the required schema and table privileges."
+    elif state == "57014":
+        message = "PostgreSQL canceled the operation. Check for a timeout or cancellation and retry."
+    elif isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        message = "No disk space is available. Free space in the report destination and try again."
+    elif (isinstance(exc, psycopg.OperationalError)
             and (not exc.sqlstate or exc.sqlstate.startswith(("08", "28", "57P")))):
         message = ("Could not connect to PostgreSQL or the connection was lost. "
                    "Check that PostgreSQL is running and verify the host, port, database and credentials.")
@@ -38,7 +52,7 @@ def display_error(exc):
         message = f"Permission denied: {exc.filename}. Check access to the file or directory."
     elif isinstance(exc, UnicodeDecodeError):
         message = (f"Could not decode the CSV using {exc.encoding}. "
-                   "Check the file encoding or specify it with --encoding, for example --encoding latin-1.")
+                   "Check the file encoding. Retry reports must be UTF-8; for other CSVs, use --encoding, for example --encoding latin-1.")
     elif isinstance(exc, csv.Error):
         if "field larger than field limit" in str(exc):
             message = f"Invalid CSV: a field exceeds the {CSV_FIELD_LIMIT:,}-character limit."
@@ -129,14 +143,21 @@ def validation_main(argv):
     return 0
 
 
-def main(argv=None):
+def file_signature(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _main(argv=None):
     configure_windows_output()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "validate":
         return validation_main(argv[1:])
     if argv and argv[0] == "preview":
         return preview_main(argv[1:])
-    parser = argparse.ArgumentParser(usage="%(prog)s CSV [options]", description="Import a CSV into an existing PostgreSQL table.")
+    retry = bool(argv and argv[0] == "retry")
+    if retry:
+        argv.pop(0)
+    parser = argparse.ArgumentParser(prog="rowport retry" if retry else None, usage="%(prog)s CSV [options]", description="Import a CSV into an existing PostgreSQL table.")
     parser.add_argument("csv", type=Path, help="Input CSV file")
     essential = parser.add_argument_group("Required for import", "These can also be supplied by --config.")
     essential.add_argument("--table", help="Existing PostgreSQL table")
@@ -155,9 +176,11 @@ def main(argv=None):
     behavior.add_argument("--skip-duplicates", action=argparse.BooleanOptionalAction, default=False, help="Skip unique constraint violations on the target table")
     behavior.add_argument("--empty-as-null", action=argparse.BooleanOptionalAction, default=False, help="Insert empty CSV fields as SQL NULL")
     behavior.add_argument("--dry-run", action="store_true", help="Test import and roll back inserted rows")
-    parser.epilog = "Check headers: rowport validate CSV --table TABLE. Preview rows: rowport preview CSV."
+    parser.epilog = "Retry corrected rejects: rowport retry CSV --table TABLE --rejects REPORT. Check headers: rowport validate CSV --table TABLE. Preview rows: rowport preview CSV."
     apply_config(parser, argv, set(CONFIG_FIELDS))
     args = parser.parse_args(argv)
+    if retry:
+        args.delimiter, args.encoding = ",", "utf-8-sig"
     if not args.table or not args.rejects:
         parser.error("--table and --rejects are required (or set them in --config).")
     if args.postgres_csv and args.empty_as_null:
@@ -169,32 +192,59 @@ def main(argv=None):
         return 1
     if not dsn:
         parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
+    progress_bar = None
     try:
         if same_file(args.csv, args.rejects):
             raise InputError("The rejection report must differ from the input CSV (including hard links).")
         if args.config and same_file(args.config, args.rejects):
             raise InputError("The rejection report must differ from the configuration file (including hard links).")
         error_counts = Counter()
+        source_stat = args.csv.stat()
+        if sys.stdout.isatty() and stat.S_ISREG(source_stat.st_mode):
+            progress_bar = ProgressBar(sys.stdout)
+            progress_bar.counting()
+            signature = file_signature(source_stat)
+            with read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding, postgres_csv=args.postgres_csv) as (_, count_rows):
+                total = sum(1 for _ in count_rows)
+            if file_signature(args.csv.stat()) != signature:
+                raise InputError("Input CSV changed during import; no rows were committed. Retry.")
+            progress_bar.start(total)
         with read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding, postgres_csv=args.postgres_csv) as (headers, rows), staged_report(args.rejects) as (target, report):
+            if retry:
+                headers = retry_headers(headers)
+                rows = retry_rows(rows, len(headers))
+            source_headers = headers
             headers = map_headers(headers, args.map)
             with psycopg.connect(dsn) as conn:
                 with conn.transaction():
                     validate_headers(headers, table_columns(conn, args.schema, args.table))
                     saved, rejected, skipped = import_rows(conn, args.schema, args.table, headers, rows, report,
-                                                           progress=show_progress, skip_duplicates=args.skip_duplicates,
+                                                           progress=progress_bar.update if progress_bar else show_progress,
+                                                           progress_interval=1 if progress_bar else 10_000,
+                                                           skip_duplicates=args.skip_duplicates,
                                                            empty_as_null=args.empty_as_null, error_counts=error_counts,
-                                                           postgres_csv=args.postgres_csv)
+                                                           postgres_csv=args.postgres_csv, report_headers=source_headers)
+                    if progress_bar and file_signature(args.csv.stat()) != signature:
+                        raise InputError("Input CSV changed during import; no rows were committed. Retry.")
                     report.flush()
                     if args.dry_run:
                         conn.execute("SET CONSTRAINTS ALL IMMEDIATE")
                         raise psycopg.Rollback()
+            if progress_bar:
+                progress_bar.finish()
             try:
                 write_report(target, report)
             except OSError as exc:
                 message = "Dry run rolled back" if args.dry_run else f"Saved {saved} rows"
                 print(f"{message}, but could not write the report: {exc}", file=sys.stderr)
                 return 1
+    except KeyboardInterrupt:
+        if progress_bar:
+            progress_bar.finish()
+        raise
     except (OSError, UnicodeError, csv.Error, InputError, psycopg.Error) as exc:
+        if progress_bar:
+            progress_bar.finish()
         display_error(exc)
         return 1
     summary = (f"Dry run: rows that would be saved: {saved}. Rows rejected: {rejected}."
@@ -209,6 +259,14 @@ def main(argv=None):
     if args.dry_run:
         print("Dry run rolled back the transaction; no rows were saved.")
     return 0
+
+
+def main(argv=None):
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("\nInterrupted. If importing, check the database and report before retrying; the transaction may already have committed.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

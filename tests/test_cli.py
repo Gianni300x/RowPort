@@ -1,5 +1,6 @@
 import argparse
 import csv
+import errno
 import io
 import random
 import tempfile
@@ -203,8 +204,21 @@ class RowPortTests(unittest.TestCase):
                 write_report(target, report)
             with path.open(encoding="utf-8", newline="") as report:
                 records = list(csv.reader(report))
-            self.assertEqual([int(row[0]) for row in records[1:]], [3, 4])
-            self.assertEqual(list(csv.reader([records[2][1]]))[0], ["extra", "3", "4"])
+            self.assertEqual([int(row[2]) for row in records[1:]], [3, 4])
+            self.assertEqual(records[2][:2], ["extra", "3"])
+            self.assertEqual(records[2][-1], '["4"]')
+
+    def test_report_diagnostic_headers_avoid_original_column_collisions(self):
+        from scripts.importer import report_metadata_headers, retry_headers
+        original = ["rowport_record", "rowport_error", "rowport_extra"]
+        diagnostic = report_metadata_headers(original)
+        self.assertEqual(diagnostic, ["rowport_record_", "rowport_error_", "rowport_extra_"])
+        self.assertEqual(retry_headers(original + diagnostic), original)
+
+    def test_retry_refuses_unresolved_extra_fields(self):
+        from scripts.importer import retry_rows
+        with self.assertRaisesRegex(InputError, "extra fields"):
+            list(retry_rows([["ok", "2", "bad", '["extra"]']], 1))
 
     def test_subcommands_accept_options_before_csv(self):
         source = Path(__file__).resolve().parent.parent / "examples" / "properties.csv"
@@ -284,6 +298,29 @@ class RowPortTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertNotIn("secret", stderr.getvalue())
             self.assertIn("Check that PostgreSQL is running", stderr.getvalue())
+
+    def test_database_error_guidance_does_not_expose_details(self):
+        from scripts.cli import display_error
+        cases = [
+            (psycopg.errors.InvalidPassword("password=secret"), "authentication failed"),
+            (psycopg.errors.InvalidCatalogName("password=secret"), "database was not found"),
+            (psycopg.errors.InsufficientPrivilege("password=secret"), "denied access"),
+            (psycopg.errors.QueryCanceled("password=secret"), "canceled the operation"),
+            (OSError(errno.ENOSPC, "no space"), "No disk space"),
+        ]
+        for error, expected in cases:
+            output = io.StringIO()
+            with self.subTest(error=error), redirect_stderr(output):
+                display_error(error)
+                self.assertIn(expected, output.getvalue())
+                self.assertNotIn("secret", output.getvalue())
+
+    def test_interruption_exits_without_claiming_rollback(self):
+        stderr = io.StringIO()
+        with patch("scripts.cli._main", side_effect=KeyboardInterrupt), redirect_stderr(stderr):
+            self.assertEqual(main([]), 130)
+        self.assertIn("check the database and report", stderr.getvalue())
+        self.assertIn("may already have committed", stderr.getvalue())
 
     def test_preview_reports_missing_file_with_suggestion(self):
         with tempfile.TemporaryDirectory() as directory:
