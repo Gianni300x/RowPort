@@ -49,11 +49,25 @@ To use your own database or CSV, follow the manual installation below.
 
 Python 3.10 or later and an accessible PostgreSQL database are required.
 
+On macOS or Linux:
+
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
 ```
+
+On Windows, using PowerShell:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install .
+```
+
+If PowerShell's execution policy prevents activation, you can install and run
+without changing the policy by using `.\.venv\Scripts\python.exe -m pip install .`
+and replacing `rowport` in the examples with `.\.venv\Scripts\rowport.exe`.
 
 ## Usage
 
@@ -64,8 +78,11 @@ then edit it with your PostgreSQL connection string:
 cp .env.example .env
 ```
 
+In Windows PowerShell, you can use `Copy-Item .env.example .env` instead.
+
 The `.env` file is ignored by Git because it can contain credentials. Use a single
-line `DATABASE_URL=...` (optionally surrounded by single or double quotes). If a
+line `DATABASE_URL=...` (optionally surrounded by single or double quotes). A
+UTF-8 BOM is accepted. If a
 username or password contains special URL characters, percent-encode them.
 
 Create the example table in your database using `examples/properties.sql`.
@@ -74,6 +91,15 @@ For example, with `psql`, replace the user and database names below with yours
 
 ```sh
 psql -h localhost -U your_user -d your_database -f examples/properties.sql
+```
+
+`psql` is a PostgreSQL command-line tool and must be installed separately if it
+is not available. On Windows, if it is not on `PATH`, call `psql.exe` from
+your PostgreSQL installation's `bin` folder. For example, in PowerShell (adjust
+the version and installation path):
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -h localhost -U your_user -d your_database -f examples/properties.sql
 ```
 
 Then import the example CSV:
@@ -329,6 +355,10 @@ separate, immediately flushed stdout lines, so it remains readable in Docker
 logs and when redirected to a file. Errors go to stderr; use `> import.log 2>&1`
 to capture both streams.
 
+On Windows, redirected stdout and stderr use UTF-8 by default so previews and
+errors can include Unicode characters. An explicitly configured
+`PYTHONIOENCODING` takes precedence.
+
 ### Command options at a glance
 
 Both import and `validate` require a CSV file path as a positional argument.
@@ -380,6 +410,14 @@ The unit tests use simulated database responses. Integration tests can be run ag
 ```sh
 ROWPORT_TEST_DSN="$DATABASE_URL" python -m unittest discover -s tests -v
 ```
+
+## Code structure
+
+- `scripts/cli.py` handles commands, arguments and console output.
+- `scripts/config.py` reads connection settings and reusable configurations.
+- `scripts/csv_io.py` reads and interprets CSV input and column mappings.
+- `scripts/importer.py` validates the table, imports rows and manages reports.
+- `scripts/errors.py` defines errors shared by those modules.
 
 ## License
 

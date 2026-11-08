@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import psycopg
 
-from scripts.cli import InputError, csv_delimiter, csv_encoding, database_url, import_rows, main, map_headers, read_csv, show_progress, staged_report, validate_headers, write_report
+from scripts.cli import InputError, configure_windows_output, csv_delimiter, csv_encoding, database_url, import_rows, main, map_headers, read_csv, show_progress, staged_report, validate_headers, write_report
 
 
 class Connection:
@@ -79,6 +79,21 @@ class RowPortTests(unittest.TestCase):
                 self.assertEqual(database_url(path), "postgresql://file/db")
             with patch.dict("os.environ", {"DATABASE_URL": "postgresql://env/db"}):
                 self.assertEqual(database_url(path), "postgresql://env/db")
+            path.write_text('DATABASE_URL="postgresql://bom/db"\n', encoding="utf-8-sig")
+            with patch.dict("os.environ", {}, clear=True):
+                self.assertEqual(database_url(path), "postgresql://bom/db")
+
+    def test_windows_redirected_output_uses_utf8_and_respects_explicit_encoding(self):
+        with patch.dict("os.environ", {"PYTHONIOENCODING": ""}):
+            stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+            configure_windows_output(platform="win32", streams=(stream,))
+            stream.write("España 🧉")
+            stream.flush()
+            self.assertEqual(stream.buffer.getvalue().decode("utf-8"), "España 🧉")
+        with patch.dict("os.environ", {"PYTHONIOENCODING": "cp1252"}):
+            stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+            configure_windows_output(platform="win32", streams=(stream,))
+            self.assertEqual(stream.encoding, "cp1252")
 
     def test_explicit_dsn_takes_precedence(self):
         with tempfile.TemporaryDirectory() as directory:

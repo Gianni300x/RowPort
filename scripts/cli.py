@@ -1,163 +1,28 @@
 import argparse
 import csv
-import io
 import itertools
 import json
 import os
-import stat
 import sys
-import tempfile
 from collections import Counter
-from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg
-from psycopg import sql
+
+from .config import CONFIG_FIELDS, apply_config, database_url
+from .csv_io import CSV_FIELD_LIMIT, csv_delimiter, csv_encoding, map_headers, read_csv
+from .errors import InputError
+from .importer import (import_rows, same_file, show_progress, staged_report,
+                       table_columns, validate_headers, write_report)
 
 
-class InputError(Exception):
-    """The CSV or target table cannot be used for an import."""
-
-
-CSV_FIELD_LIMIT = 16 * 1024 * 1024  # Characters in one field, not bytes in the file.
-
-
-def database_url(path=Path(".env")):
-    """Read the connection from the environment or the current directory's .env."""
-    if os.environ.get("DATABASE_URL"):
-        return os.environ["DATABASE_URL"]
-    if not path.exists():
-        return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key.strip() == "DATABASE_URL":
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                value = value[1:-1]
-            return value or None
-    return None
-
-
-def csv_delimiter(value):
-    if len(value) != 1 or value in "\r\n\0\"":
-        raise argparse.ArgumentTypeError("Delimiter must be one character other than a quote, newline, or NUL; for example, --delimiter ';'.")
-    return value
-
-
-def csv_encoding(value):
-    try:
-        with io.TextIOWrapper(io.BytesIO(), encoding=value):
-            pass
-    except (LookupError, ValueError):
-        raise argparse.ArgumentTypeError(f"Unknown or unsupported text encoding: {value}. Try --encoding utf-8-sig or --encoding latin-1.") from None
-    return value
-
-
-class RecordingLines:
-    """Capture the physical lines consumed by csv.reader for one record."""
-
-    def __init__(self, source):
-        self.source = iter(source)
-        self.lines = []
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        line = next(self.source)
-        self.lines.append(line)
-        return line
-
-    def take(self):
-        lines, self.lines = self.lines, []
-        return lines
-
-
-def quoted_fields(lines, delimiter):
-    """Identify fields whose first character is a quote, including multiline CSV."""
-    flags = []
-    state = "start"
-    was_quoted = False
-    for char in itertools.chain.from_iterable(lines):
-        if state == "quoted":
-            if char == '"':
-                state = "after_quote"
-        elif state == "after_quote" and char == '"':
-            state = "quoted"
-        elif char == delimiter:
-            flags.append(was_quoted)
-            state, was_quoted = "start", False
-        elif char in "\r\n":
-            break
-        elif state == "start" and char == '"':
-            state, was_quoted = "quoted", True
-        else:
-            state = "unquoted"
-    flags.append(was_quoted)
-    return flags
-
-
-def postgres_rows(reader, lines, delimiter, column_count):
-    for row in reader:
-        captured = lines.take()
-        if not row:
-            # PostgreSQL COPY emits an empty line for a single NULL column.
-            yield [None] if column_count == 1 else row
-            continue
-        flags = quoted_fields(captured, delimiter)
-        if len(flags) != len(row):
-            raise InputError("Could not safely interpret PostgreSQL CSV fields; import was stopped.")
-        yield [None if value == "" and not quoted else value for value, quoted in zip(row, flags)]
-
-
-@contextmanager
-def read_csv(path, delimiter=",", encoding="utf-8-sig", postgres_csv=False):
-    previous_limit = csv.field_size_limit(CSV_FIELD_LIMIT)
-    try:
-        with path.open(encoding=encoding, newline="") as source:
-            lines = RecordingLines(source) if postgres_csv else source
-            reader = csv.reader(lines, delimiter=delimiter, strict=True)
-            headers = next(reader, None)
-            if postgres_csv:
-                lines.take()
-            if not headers or any(not name.strip() for name in headers):
-                raise InputError("CSV headers must not be empty.")
-            if len(set(headers)) != len(headers):
-                raise InputError("The CSV contains duplicate columns.")
-            yield headers, postgres_rows(reader, lines, delimiter, len(headers)) if postgres_csv else reader
-    finally:
-        csv.field_size_limit(previous_limit)
-
-
-def table_columns(conn, schema, table):
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT a.attname,
-                   a.attnotnull AND NOT a.atthasdef AND a.attidentity = ''
-            FROM pg_catalog.pg_attribute a
-            JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = %s AND c.relname = %s
-              AND c.relkind IN ('r', 'p') AND a.attnum > 0
-              AND NOT a.attisdropped AND a.attgenerated = '' AND a.attidentity <> 'a'
-            ORDER BY a.attnum
-        """, (schema, table))
-        return cur.fetchall()
-
-
-def validate_headers(headers, columns):
-    if not columns:
-        raise InputError("The table does not exist, is unsupported, or has no insertable columns. Check --table and --schema, and that the table has insertable columns.")
-    known = {name for name, _ in columns}
-    unknown = set(headers) - known
-    missing = {name for name, required in columns if required} - set(headers)
-    errors = []
-    if unknown:
-        errors.append("Unknown columns: " + ", ".join(sorted(unknown)))
-    if missing:
-        errors.append("Missing required columns: " + ", ".join(sorted(missing)))
-    if errors:
-        raise InputError("; ".join(errors) + ". Check the CSV headers and table columns, or use --map CSV_COLUMN=TABLE_COLUMN.")
+def configure_windows_output(platform=None, streams=None):
+    """Use UTF-8 for redirected Windows output unless explicitly configured."""
+    if (sys.platform if platform is None else platform) != "win32" or os.environ.get("PYTHONIOENCODING"):
+        return
+    for stream in (sys.stdout, sys.stderr) if streams is None else streams:
+        if not stream.isatty() and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def display_error(exc):
@@ -182,64 +47,6 @@ def display_error(exc):
     else:
         message = str(exc)
     print(f"Error: {message}", file=sys.stderr)
-
-
-def map_headers(headers, mappings):
-    mapping = {}
-    for item in mappings:
-        source, sep, target = item.partition("=")
-        if not sep or not source.strip() or not target.strip():
-            raise InputError("Each --map must have the form CSV_COLUMN=TABLE_COLUMN.")
-        if source in mapping:
-            raise InputError(f"Duplicate mapping for CSV column: {source}")
-        if source not in headers:
-            raise InputError(f"Mapped CSV column not found: {source}")
-        mapping[source] = target
-    result = [mapping.get(header, header) for header in headers]
-    duplicates = sorted(name for name, count in Counter(result).items() if count > 1)
-    if duplicates:
-        raise InputError("Multiple CSV columns map to the same table column: " + ", ".join(duplicates))
-    return result
-
-
-CONFIG_FIELDS = {
-    "table": str, "schema": str, "delimiter": str, "encoding": str,
-    "map": list, "rejects": str, "skip_duplicates": bool, "empty_as_null": bool, "postgres_csv": bool,
-}
-
-
-def apply_config(parser, argv, fields):
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--config", type=Path)
-    known, _ = pre.parse_known_args(argv)
-    if not known.config:
-        return
-    try:
-        config = json.loads(known.config.read_text(encoding="utf-8"))
-        if not isinstance(config, dict):
-            raise ValueError("configuration must be a JSON object")
-        unknown = set(config) - set(CONFIG_FIELDS)
-        if unknown:
-            raise ValueError("unknown configuration keys: " + ", ".join(sorted(unknown)))
-        for key, value in config.items():
-            if type(value) is not CONFIG_FIELDS[key]:
-                raise ValueError(f"{key} must be {CONFIG_FIELDS[key].__name__}")
-            if key == "map" and not all(isinstance(item, str) for item in value):
-                raise ValueError("map must contain strings")
-            if key in ("table", "schema", "rejects") and not value.strip():
-                raise ValueError(f"{key} cannot be empty")
-        if "delimiter" in config:
-            csv_delimiter(config["delimiter"])
-        if "encoding" in config:
-            csv_encoding(config["encoding"])
-        defaults = {key: value for key, value in config.items() if key in fields}
-        if "rejects" in defaults:
-            defaults["rejects"] = Path(defaults["rejects"])
-        if any(arg == "--map" or arg.startswith("--map=") for arg in argv):
-            defaults.pop("map", None)
-        parser.set_defaults(**defaults)
-    except (OSError, UnicodeError, ValueError, argparse.ArgumentTypeError) as exc:
-        parser.error(f"Invalid configuration: {exc}")
 
 
 def positive_int(value):
@@ -279,126 +86,6 @@ def preview_main(argv):
         return 1
     print("Preview only: no database connection or inserts.")
     return 0
-
-
-def error_category(exc):
-    if isinstance(exc, psycopg.errors.UniqueViolation):
-        return "Unique constraint"
-    if isinstance(exc, psycopg.errors.NotNullViolation):
-        return "Required value"
-    if isinstance(exc, psycopg.errors.CheckViolation):
-        return "Check constraint"
-    if isinstance(exc, psycopg.errors.ForeignKeyViolation):
-        return "Foreign key constraint"
-    if isinstance(exc, psycopg.DataError):
-        return "Invalid data"
-    return "Other integrity constraint"
-
-
-def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000, skip_duplicates=False, empty_as_null=False, error_counts=None, postgres_csv=False):
-    statement = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
-        sql.Identifier(schema), sql.Identifier(table),
-        sql.SQL(", ").join(map(sql.Identifier, headers)),
-        sql.SQL(", ").join(sql.Placeholder() for _ in headers),
-    )
-    rejected = 0
-    saved = 0
-    skipped = 0
-    writer = csv.writer(report)
-    writer.writerow(["row_number", "csv_row", "reason"])
-    for number, row in enumerate(rows, start=2):
-        if len(row) != len(headers):
-            reason = f"Expected {len(headers)} values; got {len(row)}."
-            write_rejection(writer, number, row, reason, postgres_csv=postgres_csv)
-            rejected += 1
-            if error_counts is not None:
-                error_counts["Incorrect field count"] += 1
-        else:
-            try:
-                # A savepoint isolates invalid rows; the outer transaction remains atomic.
-                with conn.transaction():
-                    values = [None if value == "" else value for value in row] if empty_as_null else row
-                    conn.execute(statement, values)
-            except psycopg.errors.UniqueViolation as exc:
-                if skip_duplicates and exc.diag.schema_name == schema and exc.diag.table_name == table:
-                    skipped += 1
-                else:
-                    write_rejection(writer, number, row, exc.diag.message_primary or str(exc), postgres_csv=postgres_csv)
-                    rejected += 1
-                    if error_counts is not None:
-                        error_counts[error_category(exc)] += 1
-            except (psycopg.DataError, psycopg.IntegrityError) as exc:
-                write_rejection(writer, number, row, exc.diag.message_primary or str(exc), postgres_csv=postgres_csv)
-                rejected += 1
-                if error_counts is not None:
-                    error_counts[error_category(exc)] += 1
-            else:
-                saved += 1
-        processed = number - 1
-        if progress and processed % progress_interval == 0:
-            progress(processed, saved, rejected, skipped)
-    return saved, rejected, skipped
-
-
-def show_progress(processed, saved, rejected, skipped=0):
-    message = (f"Progress: {processed} processed; {saved} saved pending commit; "
-               f"{rejected} rejected.")
-    if skipped:
-        message += f" {skipped} duplicates skipped."
-    print(message, flush=True)
-
-
-def write_rejection(writer, number, row, reason, postgres_csv=False):
-    if postgres_csv:
-        fields = []
-        for value in row:
-            if value is None:
-                fields.append("")
-            else:
-                buffer = io.StringIO(newline="")
-                csv.writer(buffer, quoting=csv.QUOTE_ALL, lineterminator="").writerow([value])
-                fields.append(buffer.getvalue())
-        encoded = ",".join(fields)
-    else:
-        buffer = io.StringIO(newline="")
-        csv.writer(buffer, lineterminator="").writerow(row)
-        encoded = buffer.getvalue()
-    writer.writerow([number, encoded, reason])
-
-
-def write_report(path, report):
-    report.flush()
-    report.close()
-    os.replace(report.name, path)
-
-
-def same_file(first, second):
-    if first.resolve() == second.resolve():
-        return True
-    try:
-        return os.path.samefile(first, second)
-    except FileNotFoundError:
-        return False
-
-
-@contextmanager
-def staged_report(destination):
-    target = destination.resolve()
-    try:
-        mode = target.stat().st_mode
-    except FileNotFoundError:
-        pass
-    else:
-        if not stat.S_ISREG(mode):
-            raise InputError(f"Rejection report destination is not a regular file: {destination}")
-    temporary = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", newline="",
-                                            dir=target.parent, prefix=".rowport-", delete=False)
-    temporary_path = Path(temporary.name)
-    try:
-        with temporary:
-            yield target, temporary
-    finally:
-        temporary_path.unlink(missing_ok=True)
 
 
 def validation_main(argv):
@@ -443,6 +130,7 @@ def validation_main(argv):
 
 
 def main(argv=None):
+    configure_windows_output()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "validate":
         return validation_main(argv[1:])
