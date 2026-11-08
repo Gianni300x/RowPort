@@ -263,7 +263,9 @@ class IntegrationTests(unittest.TestCase):
             rejected = list(csv.DictReader(source))
         self.assertEqual(len(rejected), 1)
         self.assertEqual(rejected[0]["price"], "not a price")
-        self.assertTrue(rejected[0]["rowport_error"])
+        self.assertIn("does not match the expected data type", rejected[0]["rowport_error"])
+        self.assertIn("invalid input syntax", rejected[0]["rowport_error"])
+        self.assertIn("not a price", rejected[0]["rowport_error"])
         missing = Path(self.directory.name) / "missing.csv"
         missing.write_text("address,price\nExample,100\n", encoding="utf-8")
         result, _ = self.run_cli(missing)

@@ -31,6 +31,9 @@ All notable changes to RowPort are documented in this file.
 
 ### Changed
 
+- Explain common rejected-row errors and retain the PostgreSQL details.
+- Add a database connection walkthrough and a worked correction and retry example.
+
 - Refresh the terminal demos and documentation for progress and retry.
 - Give actionable guidance for common database, disk, CSV and interruption errors.
 - Rejection reports expose original CSV columns and diagnostic columns; this replaces the previous encoded-row format.

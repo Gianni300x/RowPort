@@ -58,6 +58,28 @@ def error_category(exc):
     return "Other integrity constraint"
 
 
+def rejection_message(exc):
+    """Explain common database errors while preserving PostgreSQL's detail."""
+    if isinstance(exc, psycopg.errors.InvalidTextRepresentation):
+        explanation = "A value does not match the expected data type."
+    elif isinstance(exc, psycopg.errors.NumericValueOutOfRange):
+        explanation = "A number is outside the allowed range."
+    elif isinstance(exc, psycopg.errors.NotNullViolation):
+        explanation = "A required value is missing."
+    elif isinstance(exc, psycopg.errors.UniqueViolation):
+        explanation = "A value conflicts with an existing unique value."
+    elif isinstance(exc, psycopg.errors.ForeignKeyViolation):
+        explanation = "A referenced value does not meet a foreign key constraint."
+    elif isinstance(exc, psycopg.errors.CheckViolation):
+        explanation = "A value does not meet a table constraint."
+    elif isinstance(exc, psycopg.DataError):
+        explanation = "A value could not be accepted by PostgreSQL."
+    else:
+        explanation = "A database constraint rejected this row."
+    detail = exc.diag.message_primary or str(exc)
+    return f"{explanation} PostgreSQL: {detail}" if detail else explanation
+
+
 def import_rows(conn, schema, table, headers, rows, report, progress=None, progress_interval=10_000, skip_duplicates=False, empty_as_null=False, error_counts=None, postgres_csv=False, report_headers=None):
     report_headers = headers if report_headers is None else report_headers
     statement = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
@@ -87,12 +109,12 @@ def import_rows(conn, schema, table, headers, rows, report, progress=None, progr
                 if skip_duplicates and exc.diag.schema_name == schema and exc.diag.table_name == table:
                     skipped += 1
                 else:
-                    write_rejection(report, number, row, exc.diag.message_primary or str(exc), len(report_headers), postgres_csv=postgres_csv)
+                    write_rejection(report, number, row, rejection_message(exc), len(report_headers), postgres_csv=postgres_csv)
                     rejected += 1
                     if error_counts is not None:
                         error_counts[error_category(exc)] += 1
             except (psycopg.DataError, psycopg.IntegrityError) as exc:
-                write_rejection(report, number, row, exc.diag.message_primary or str(exc), len(report_headers), postgres_csv=postgres_csv)
+                write_rejection(report, number, row, rejection_message(exc), len(report_headers), postgres_csv=postgres_csv)
                 rejected += 1
                 if error_counts is not None:
                     error_counts[error_category(exc)] += 1

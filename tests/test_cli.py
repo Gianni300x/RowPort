@@ -208,6 +208,22 @@ class RowPortTests(unittest.TestCase):
             self.assertEqual(records[2][:2], ["extra", "3"])
             self.assertEqual(records[2][-1], '["4"]')
 
+    def test_rejection_explanations_keep_database_details(self):
+        from scripts.importer import rejection_message
+        cases = [
+            (psycopg.errors.InvalidTextRepresentation("invalid number"), "expected data type"),
+            (psycopg.errors.NumericValueOutOfRange("too large"), "outside the allowed range"),
+            (psycopg.errors.NotNullViolation("null value"), "required value is missing"),
+            (psycopg.errors.UniqueViolation("duplicate key"), "existing unique value"),
+            (psycopg.errors.ForeignKeyViolation("missing reference"), "foreign key constraint"),
+            (psycopg.errors.CheckViolation("check failed"), "table constraint"),
+        ]
+        for error, explanation in cases:
+            with self.subTest(error=error):
+                result = rejection_message(error)
+                self.assertIn(explanation, result)
+                self.assertIn("PostgreSQL: " + str(error), result)
+
     def test_report_diagnostic_headers_avoid_original_column_collisions(self):
         from scripts.importer import report_metadata_headers, retry_headers
         original = ["rowport_record", "rowport_error", "rowport_extra"]

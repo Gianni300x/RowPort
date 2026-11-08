@@ -85,10 +85,25 @@ cp .env.example .env
 
 In Windows PowerShell, you can use `Copy-Item .env.example .env` instead.
 
-The `.env` file is ignored by Git because it can contain credentials. Use a single
-line `DATABASE_URL=...` (optionally surrounded by single or double quotes). A
-UTF-8 BOM is accepted. If a
-username or password contains special URL characters, percent-encode them.
+Open `.env` in a text editor and replace the placeholders. For example:
+
+```dotenv
+DATABASE_URL=postgresql://your_user:your_password@localhost:5432/your_database
+```
+
+- `your_user` and `your_password` are the PostgreSQL credentials for the database
+  you want to use. Ask the database administrator if you do not know them.
+- `localhost` means PostgreSQL runs on this computer; otherwise use the host
+  supplied by your administrator or provider. `5432` is the default port; use
+  your database's port if it is different.
+- `your_database` is the name of an existing database. RowPort imports into an
+  existing table within it; it does not create the database or table for you.
+
+Use the same host, port, user and database when running `psql` below. If the
+username or password contains URL-special characters, percent-encode them (for
+example, `@` becomes `%40`). The `.env` file is ignored by Git because it can
+contain credentials; do not share it. The URL can optionally be surrounded by
+single or double quotes, and a UTF-8 BOM is accepted.
 
 Create the example table in your database using `examples/properties.sql`.
 For example, with `psql`, replace the user and database names below with yours
@@ -325,6 +340,26 @@ path for the new rejection report:
 rowport retry rejects.csv --table products --rejects retry-rejects.csv
 ```
 
+For the `examples/properties.csv` import above, `rejects.csv` contains a row
+like this (the exact PostgreSQL detail can differ):
+
+| address | price | rooms | rowport_record | rowport_error | rowport_extra |
+| --- | --- | --- | --- | --- | --- |
+| 456 Maple Street | not a price | 2 | 3 | A value does not match the expected data type. PostgreSQL: invalid input syntax for type numeric: "not a price" | *(empty)* |
+
+In your CSV editor, change `price` from `not a price` to a valid number such as
+`95000`. Leave the other cells and the three diagnostic columns as they are,
+then save the file. From the same directory, run:
+
+```sh
+rowport retry rejects.csv --table properties --rejects retry-rejects.csv
+```
+
+A successful retry reports `Rows saved: 1. Rows rejected: 0.` The original
+`rejects.csv` remains available; `retry-rejects.csv` contains only rows that
+were still rejected, if any. If you save the corrected file under a different
+name, replace `rejects.csv` in the command with that name.
+
 Use the same `--schema`, column mappings and import behavior as the original
 import, if applicable. Reports use comma delimiters and UTF-8 even if the
 original file did not; `retry` reads that format regardless of `--delimiter`
@@ -337,7 +372,8 @@ this command.
 When rows are rejected, the console also groups them into broad categories such
 as invalid data, unique constraints, missing required values, and incorrect
 field counts. Skipped duplicates are counted separately, not as rejections.
-The report retains the detailed PostgreSQL reason for each rejected row.
+For common database errors, `rowport_error` starts with a plain-language
+explanation followed by PostgreSQL's original message.
 For example, an import with four invalid numeric values can end with:
 
 ```text
