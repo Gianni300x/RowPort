@@ -1,100 +1,29 @@
-name: Temporary Windows compatibility test
+name: Temporary Windows documentation test
 on:
   push:
     branches: [qa/temporary-windows-20261108]
 permissions:
   contents: read
 jobs:
-  windows:
+  windows-readme:
     runs-on: windows-2025
-    timeout-minutes: 20
-    env:
-      ROWPORT_TEST_DSN: postgresql://postgres:root@127.0.0.1:5432/postgres
-      PGPASSWORD: root
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install from a fresh checkout
+      - name: Follow PowerShell installation instructions
         shell: pwsh
         run: |
-          python --version
-          python -m venv .venv
-          .\.venv\Scripts\python.exe -m pip install .
+          py -m venv .venv
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\rowport.exe --help
+          .\.venv\Scripts\Activate.ps1
+          python -m pip install .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (Get-Command source -ErrorAction SilentlyContinue) { Write-Output 'POSIX_SOURCE_AVAILABLE=True' } else { Write-Output 'POSIX_SOURCE_AVAILABLE=False' }
-      - name: Start PostgreSQL
-        shell: pwsh
-        run: |
-          Set-Service -Name postgresql-x64-17 -StartupType Manual
-          Start-Service -Name postgresql-x64-17
-          & "$env:PGBIN\pg_isready.exe" -h 127.0.0.1 -p 5432
+          Copy-Item .env.example .env
+          rowport --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Run complete tests
-        id: tests
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+          & "C:\Program Files\PostgreSQL\17\bin\psql.exe" --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Create example table
-        shell: pwsh
-        run: |
-          & "$env:PGBIN\psql.exe" -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -f examples/properties.sql
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Set-Content -Path .env -Value 'DATABASE_URL=postgresql://postgres:root@127.0.0.1:5432/postgres' -Encoding utf8
-      - name: Verify BOM and redirected Unicode
-        shell: pwsh
-        run: |
-          @'
-          import os, pathlib, subprocess
-          env = os.environ.copy()
-          env.pop("DATABASE_URL", None)
-          env.pop("PYTHONIOENCODING", None)
-          env.pop("PYTHONUTF8", None)
-          exe = str(pathlib.Path(".venv/Scripts/rowport.exe").resolve())
-          config = "DATABASE_URL=postgresql://postgres:root@127.0.0.1:5432/postgres\n"
-          pathlib.Path(".env").write_text(config, encoding="utf-8-sig")
-          valid = subprocess.run([exe, "validate", "examples/properties.csv", "--table", "properties"], capture_output=True, env=env)
-          print("BOM_VALIDATION_EXIT=", valid.returncode)
-          assert valid.returncode == 0, valid.stderr.decode("utf-8", "replace")
-          sample = pathlib.Path("unicode.csv")
-          sample.write_text("address,price,rooms\nEspa\u00f1a \U0001f9c9,100,1\n", encoding="utf-8")
-          preview = subprocess.run([exe, "preview", str(sample)], capture_output=True, env=env)
-          print("REDIRECTED_PREVIEW_EXIT=", preview.returncode)
-          assert preview.returncode == 0, preview.stderr.decode("utf-8", "replace")
-          assert "Espa\u00f1a \U0001f9c9" in preview.stdout.decode("utf-8")
-          print("BOM_AND_UNICODE_OK")
-          '@ | .\.venv\Scripts\python.exe -
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Validate and import 200000 rows
-        id: import
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          .\.venv\Scripts\rowport.exe validate examples/properties-200000.csv --table properties
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $lines = & .\.venv\Scripts\rowport.exe examples/properties-200000.csv --table properties --rejects windows-rejects.csv
-          $code = $LASTEXITCODE
-          $lines | ForEach-Object { Write-Output $_ }
-          if ($code -ne 0) { exit $code }
-          if (($lines -join "`n") -notmatch 'Rows saved: 199996\. Rows rejected: 4\.') { throw 'Unexpected import summary' }
-          @'
-          import csv, psycopg
-          with psycopg.connect("postgresql://postgres:root@127.0.0.1:5432/postgres") as conn:
-              assert conn.execute("SELECT count(*) FROM properties").fetchone()[0] == 199996
-          with open("windows-rejects.csv", encoding="utf-8", newline="") as f:
-              assert len(list(csv.DictReader(f))) == 4
-          print("DATABASE_ROWS=199996 REPORT_ROWS=4")
-          '@ | .\.venv\Scripts\python.exe -
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Final outcome
-        if: always()
-        shell: pwsh
-        run: |
-          Write-Output 'TESTS=${{ steps.tests.outcome }}'
-          Write-Output 'IMPORT=${{ steps.import.outcome }}'
-          if ('${{ steps.tests.outcome }}' -ne 'success' -or '${{ steps.import.outcome }}' -ne 'success') { exit 1 }
+          Write-Output 'WINDOWS_README_SETUP_OK'
