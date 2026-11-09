@@ -1,6 +1,24 @@
 # RowPort
 
-RowPort is a Python CLI that imports CSV files into an existing PostgreSQL table. It saves valid rows and writes rejected rows with their reasons to a CSV report.
+RowPort is a command-line tool for importing CSV files into PostgreSQL while
+identifying the rows that could not be inserted. It saves valid rows, writes
+rejected rows and their reasons to a CSV report, and lets you retry those rows
+after correcting them.
+
+**CSV file → PostgreSQL import → rejection report → correct and retry**
+
+RowPort works with an existing PostgreSQL table. To check an import without
+saving rows, use `--dry-run`.
+
+## When to use RowPort
+
+- **Migrate records:** import a CSV exported from another system and review
+  rows that do not match the destination table's rules.
+- **Load customer or product data:** save valid records while keeping a report
+  of invalid values to correct and retry.
+- **Check an import first:** run a dry run to find rejected rows before
+  committing the import. See [dry-run limitations](#test-an-import) for
+  database side effects that a rollback may not undo.
 
 ## Start here
 
