@@ -465,6 +465,70 @@ On Windows, redirected stdout and stderr use UTF-8 by default so previews and
 errors can include Unicode characters. An explicitly configured
 `PYTHONIOENCODING` takes precedence.
 
+### Use RowPort in scripts
+
+For import and retry, add `--summary-json FILE` to save a machine-readable
+summary and `--fail-on-rejects` to return exit code **3** when any rows are
+rejected:
+
+```sh
+rowport data.csv --table products --rejects reports/rejects.csv --summary-json reports/summary.json --fail-on-rejects
+```
+
+`--fail-on-rejects` changes the exit status only: valid rows are still committed.
+Use `--dry-run` to roll back instead. Skipped duplicates do not trigger code 3.
+Without this option, completed imports still return 0 even with rejected rows.
+Both options are command-line only; they are not JSON configuration keys.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Completed; may include rejections unless `--fail-on-rejects` is enabled. |
+| `1` | Input, database, or output error. Check the error message; a failure after commit does not undo saved rows. |
+| `2` | Invalid command arguments or configuration. |
+| `3` | Completed with rejected rows and `--fail-on-rejects` enabled. |
+| `130` | Interrupted. Check the database and reports before retrying. |
+
+For example, a summary for two input rows, one saved and one rejected, is:
+
+```json
+{
+  "format_version": 1,
+  "status": "completed_with_rejections",
+  "command": "import",
+  "schema": "public",
+  "table": "products",
+  "dry_run": false,
+  "rows_processed": 2,
+  "rows_saved": 1,
+  "rows_would_save": null,
+  "rows_rejected": 1,
+  "duplicates_skipped": 0,
+  "rejection_categories": {"Invalid data": 1},
+  "duration_seconds": 0.125,
+  "exit_code": 3
+}
+```
+
+`status` is `completed` when there are no rejections; `command` is `retry` for
+a retry. In a dry run, `rows_saved` is 0 and `rows_would_save` contains the
+number of rows that passed insertion. `rows_processed` includes saved (or
+would-save), rejected and skipped rows. Duration measures elapsed time from
+input/output checks through import and rejection-report publication, including
+the preliminary counting pass in interactive terminals; JSON publication is
+excluded. Categories contain counts, without original PostgreSQL error messages.
+The summary excludes credentials, connection details, file paths and row values;
+schema and table names are included.
+
+The destination directory must exist. The summary must be separate from the
+input, configuration and rejection report, including hard links. Its destination
+is checked before connecting to PostgreSQL. After completion, RowPort atomically
+replaces the JSON file; an earlier file is preserved if the run fails. **Always
+check the process exit status:** an existing summary may belong to a previous
+run. No failure summary is generated. Rejection-report and JSON publication are
+separate operations after the database transaction: if JSON publication fails,
+RowPort returns 1 and reports that valid rows were already saved (or the dry run
+rolled back) and the rejection report was written.
+
 ### Command options at a glance
 
 Import, `retry`, and `validate` require a CSV file path as a positional argument.
@@ -487,6 +551,8 @@ The table below summarizes the options for each command:
 | `--no-skip-duplicates`, `--no-empty-as-null` | Import, retry | — | Override the corresponding enabled JSON configuration option. |
 | `--no-postgres-csv` | Import, retry, validate, preview | — | Overrides `postgres_csv: true` in the configuration file. |
 | `--dry-run` | Import, retry | Off | Tests insertion and rolls back the transaction. |
+| `--summary-json FILE` | Import, retry | None | Atomically writes a JSON completion summary. |
+| `--fail-on-rejects` | Import, retry | Off | Returns exit code 3 on completed runs with rejections; valid rows still commit unless using dry-run. |
 | `--limit N` | Preview | 5 rows | Limits the number of rows displayed. |
 | `-h`, `--help` | Import, retry, validate, preview | — | Displays help for the selected command. |
 

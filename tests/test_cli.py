@@ -2,6 +2,8 @@ import argparse
 import csv
 import errno
 import io
+import json
+import os
 import random
 import tempfile
 import unittest
@@ -38,6 +40,96 @@ class Connection:
 
 
 class RowPortTests(unittest.TestCase):
+    def test_automation_summary_and_exit_policy(self):
+        for retry in (False, True):
+            for strict, values, expected in [(False, ["ok", "invalid"], 0),
+                                             (True, ["ok", "invalid"], 3),
+                                             (True, ["ok"], 0), (True, [], 0)]:
+                with self.subTest(retry=retry, strict=strict, values=values), tempfile.TemporaryDirectory() as directory:
+                    source, report, summary = [Path(directory) / name for name in ("input.csv", "rejects.csv", "summary.json")]
+                    with source.open("w", encoding="utf-8", newline="") as f:
+                        writer = csv.writer(f)
+                        if retry:
+                            writer.writerow(["a", "rowport_record", "rowport_error", "rowport_extra"])
+                            writer.writerows([value, 2, "private previous error", ""] for value in values)
+                        else:
+                            writer.writerow(["a"])
+                            writer.writerows([value] for value in values)
+                    conn = Connection()
+                    args = (["retry"] if retry else []) + [str(source), "--dsn", "postgresql://user:secret@host/db",
+                            "--table", "t", "--rejects", str(report), "--summary-json", str(summary)]
+                    if strict:
+                        args.append("--fail-on-rejects")
+                    with patch("scripts.cli.psycopg.connect", return_value=conn), \
+                         patch("scripts.cli.table_columns", return_value=[("a", True)]), redirect_stdout(io.StringIO()):
+                        self.assertEqual(main(args), expected)
+                    data = json.loads(summary.read_text(encoding="utf-8"))
+                    self.assertEqual(data["exit_code"], expected)
+                    self.assertEqual(data["command"], "retry" if retry else "import")
+                    self.assertEqual(data["rows_processed"], len(values))
+                    self.assertEqual(data["rows_saved"], len(conn.executed))
+                    self.assertEqual(data["rows_rejected"], values.count("invalid"))
+                    self.assertEqual(data["rejection_categories"], {"Invalid data": 1} if "invalid" in values else {})
+                    self.assertGreaterEqual(data["duration_seconds"], 0)
+                    self.assertNotIn("secret", summary.read_text())
+                    self.assertNotIn("private previous error", summary.read_text())
+                    with report.open(encoding="utf-8", newline="") as f:
+                        self.assertEqual(len(list(csv.reader(f))), 1 + values.count("invalid"))
+
+    def test_summary_destinations_checked_before_database_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, report, config, alias = [Path(directory) / name for name in ("in.csv", "rejects.csv", "config.json", "alias.json")]
+            source.write_text("a\nok\n", encoding="utf-8")
+            report.write_text("old report", encoding="utf-8")
+            config.write_text("{}", encoding="utf-8")
+            os.link(source, alias)
+            for destination in (source, report, config, alias, Path(directory), Path(directory) / "missing" / "summary.json"):
+                with self.subTest(destination=destination), patch("scripts.cli.psycopg.connect") as connect, redirect_stderr(io.StringIO()):
+                    self.assertEqual(main([str(source), "--dsn", "test", "--table", "t", "--rejects", str(report),
+                                           "--config", str(config), "--summary-json", str(destination)]), 1)
+                    connect.assert_not_called()
+            self.assertEqual(source.read_text(), "a\nok\n")
+            self.assertEqual(report.read_text(), "old report")
+            self.assertFalse(list(Path(directory).glob(".rowport-*")))
+
+    def test_failed_import_preserves_existing_json_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, report, summary = [Path(directory) / name for name in ("in.csv", "rejects.csv", "summary.json")]
+            source.write_text("a\nok\n", encoding="utf-8")
+            summary.write_text("previous summary", encoding="utf-8")
+            with patch("scripts.cli.psycopg.connect", return_value=Connection(psycopg.OperationalError("private error"))), \
+                 patch("scripts.cli.table_columns", return_value=[("a", True)]), redirect_stderr(io.StringIO()):
+                self.assertEqual(main([str(source), "--dsn", "test", "--table", "t", "--rejects", str(report),
+                                       "--summary-json", str(summary), "--fail-on-rejects"]), 1)
+            self.assertEqual(summary.read_text(), "previous summary")
+            self.assertFalse(report.exists())
+            self.assertFalse(list(Path(directory).glob(".rowport-*")))
+
+    def test_json_publish_failure_reports_committed_rows_and_preserves_previous_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, report, summary = [Path(directory) / name for name in ("in.csv", "rejects.csv", "summary.json")]
+            source.write_text("a\nok\n", encoding="utf-8")
+            summary.write_text("previous summary", encoding="utf-8")
+            conn = Connection()
+            stderr = io.StringIO()
+            replace = os.replace
+
+            def fail_summary(first, second):
+                if second == summary.resolve():
+                    raise OSError("publish failed")
+                return replace(first, second)
+
+            with patch("scripts.cli.psycopg.connect", return_value=conn), \
+                 patch("scripts.cli.table_columns", return_value=[("a", True)]), \
+                 patch("scripts.cli.os.replace", side_effect=fail_summary), redirect_stderr(stderr):
+                self.assertEqual(main([str(source), "--dsn", "test", "--table", "t", "--rejects", str(report),
+                                       "--summary-json", str(summary)]), 1)
+            self.assertIn("Saved 1 rows; rejection report written", stderr.getvalue())
+            self.assertEqual(conn.executed, [["ok"]])
+            self.assertTrue(report.exists())
+            self.assertEqual(summary.read_text(), "previous summary")
+            self.assertFalse(list(Path(directory).glob(".rowport-*")))
+
     def test_help_groups_options_by_purpose(self):
         for argv, expected in [(["--help"], ["Required for import", "Database connection", "CSV format and columns", "Import behavior"]),
                                (["validate", "--help"], ["Database and table", "CSV format and columns"]),

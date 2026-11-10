@@ -480,6 +480,53 @@ class IntegrationTests(unittest.TestCase):
         with report.open(encoding="utf-8", newline="") as f:
             self.assertEqual(len(list(csv.DictReader(f))), 1)
 
+    def test_automation_summary_tracks_commits_dry_run_duplicates_and_retry(self):
+        source = Path(self.directory.name) / "automation.csv"
+        report = Path(self.directory.name) / "rejects.csv"
+        summary = Path(self.directory.name) / "summary.json"
+        source.write_text("address,price,rooms\nFirst,100,2\nBad,invalid,3\nFirst,200,1\n", encoding="utf-8")
+        with psycopg.connect(DSN) as conn:
+            conn.execute(sql.SQL("ALTER TABLE {}.properties ADD UNIQUE (address)").format(sql.Identifier(self.schema)))
+        base = [sys.executable, "-m", "scripts.cli"]
+        options = ["--dsn", DSN, "--schema", self.schema, "--table", "properties", "--rejects", str(report),
+                   "--summary-json", str(summary), "--fail-on-rejects", "--skip-duplicates"]
+        dry = subprocess.run([*base, str(source), *options, "--dry-run"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(dry.returncode, 3, dry.stderr)
+        self.assertEqual(self.count(), 0)
+        data = json.loads(summary.read_text())
+        self.assertTrue(data["dry_run"])
+        self.assertEqual(data["rows_saved"], 0)
+        self.assertEqual(data["rows_would_save"], 1)
+        self.assertEqual(data["duplicates_skipped"], 1)
+        self.assertEqual(data["rows_rejected"], 1)
+        self.assertEqual(data["rows_processed"], 3)
+
+        imported = subprocess.run([*base, str(source), *options], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(imported.returncode, 3, imported.stderr)
+        self.assertEqual(self.count(), 1)
+        data = json.loads(summary.read_text())
+        self.assertEqual(data["rows_saved"], 1)
+        self.assertIsNone(data["rows_would_save"])
+        self.assertEqual(data["rejection_categories"], {"Invalid data": 1})
+        self.assertEqual(data["status"], "completed_with_rejections")
+
+        with report.open(encoding="utf-8", newline="") as f:
+            rows = list(csv.reader(f))
+        rows[1][1] = "150"
+        with report.open("w", encoding="utf-8", newline="") as f:
+            csv.writer(f).writerows(rows)
+        retry_report = Path(self.directory.name) / "retry.csv"
+        options[options.index(str(report))] = str(retry_report)
+        retried = subprocess.run([*base, "retry", str(report), *options], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertEqual(self.count(), 2)
+        data = json.loads(summary.read_text())
+        self.assertEqual(data["command"], "retry")
+        self.assertEqual(data["rows_saved"], 1)
+        self.assertEqual(data["rows_rejected"], 0)
+        self.assertEqual(data["exit_code"], 0)
+        self.assertEqual(data["status"], "completed")
+
     def test_invalid_config_does_not_modify_database(self):
         config = Path(self.directory.name) / "invalid.json"
         config.write_text('{"table": "properties", "skip_duplicates": "false"}', encoding="utf-8")

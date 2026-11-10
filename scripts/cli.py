@@ -6,7 +6,9 @@ import json
 import os
 import stat
 import sys
+import time
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 
 import psycopg
@@ -176,6 +178,8 @@ def _main(argv=None):
     behavior.add_argument("--skip-duplicates", action=argparse.BooleanOptionalAction, default=False, help="Skip unique constraint violations on the target table")
     behavior.add_argument("--empty-as-null", action=argparse.BooleanOptionalAction, default=False, help="Insert empty CSV fields as SQL NULL")
     behavior.add_argument("--dry-run", action="store_true", help="Test import and roll back inserted rows")
+    behavior.add_argument("--fail-on-rejects", action="store_true", help="Exit with code 3 if rows are rejected; valid rows are still committed unless --dry-run")
+    parser.add_argument_group("Automation").add_argument("--summary-json", type=Path, metavar="FILE", help="Write a JSON summary after completion (overwrites FILE)")
     parser.epilog = "Retry corrected rejects: rowport retry CSV --table TABLE --rejects REPORT. Check headers: rowport validate CSV --table TABLE. Preview rows: rowport preview CSV."
     apply_config(parser, argv, set(CONFIG_FIELDS))
     args = parser.parse_args(argv)
@@ -193,11 +197,16 @@ def _main(argv=None):
     if not dsn:
         parser.error("Provide --dsn or set DATABASE_URL in the environment or .env file.")
     progress_bar = None
+    started = time.perf_counter()
     try:
         if same_file(args.csv, args.rejects):
             raise InputError("The rejection report must differ from the input CSV (including hard links).")
         if args.config and same_file(args.config, args.rejects):
             raise InputError("The rejection report must differ from the configuration file (including hard links).")
+        if args.summary_json:
+            for protected in (args.csv, args.rejects, args.config):
+                if protected and same_file(args.summary_json, protected):
+                    raise InputError("The JSON summary must differ from the input, rejection report and configuration (including hard links).")
         error_counts = Counter()
         source_stat = args.csv.stat()
         if sys.stdout.isatty() and stat.S_ISREG(source_stat.st_mode):
@@ -209,7 +218,11 @@ def _main(argv=None):
             if file_signature(args.csv.stat()) != signature:
                 raise InputError("Input CSV changed during import; no rows were committed. Retry.")
             progress_bar.start(total)
-        with read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding, postgres_csv=args.postgres_csv) as (headers, rows), staged_report(args.rejects) as (target, report):
+        with ExitStack() as stack:
+            headers, rows = stack.enter_context(read_csv(args.csv, delimiter=args.delimiter, encoding=args.encoding, postgres_csv=args.postgres_csv))
+            target, report = stack.enter_context(staged_report(args.rejects))
+            if args.summary_json:
+                summary_target, summary_file = stack.enter_context(staged_report(args.summary_json))
             if retry:
                 headers, safe_report = retry_headers(headers)
                 rows = retry_rows(rows, len(headers), safe=safe_report)
@@ -238,6 +251,32 @@ def _main(argv=None):
                 message = "Dry run rolled back" if args.dry_run else f"Saved {saved} rows"
                 print(f"{message}, but could not write the report: {exc}", file=sys.stderr)
                 return 1
+            exit_code = 3 if args.fail_on_rejects and rejected else 0
+            if args.summary_json:
+                result = {
+                    "format_version": 1,
+                    "status": "completed_with_rejections" if rejected else "completed",
+                    "command": "retry" if retry else "import",
+                    "schema": args.schema,
+                    "table": args.table,
+                    "dry_run": args.dry_run,
+                    "rows_processed": saved + rejected + skipped,
+                    "rows_saved": 0 if args.dry_run else saved,
+                    "rows_would_save": saved if args.dry_run else None,
+                    "rows_rejected": rejected,
+                    "duplicates_skipped": skipped,
+                    "rejection_categories": dict(sorted(error_counts.items())),
+                    "duration_seconds": round(time.perf_counter() - started, 6),
+                    "exit_code": exit_code,
+                }
+                try:
+                    json.dump(result, summary_file, ensure_ascii=False, indent=2)
+                    summary_file.write("\n")
+                    write_report(summary_target, summary_file)
+                except OSError:
+                    message = "Dry run rolled back" if args.dry_run else f"Saved {saved} rows"
+                    print(f"{message}; rejection report written, but could not write the JSON summary. Check the database and reports before retrying.", file=sys.stderr)
+                    return 1
     except KeyboardInterrupt:
         if progress_bar:
             progress_bar.finish()
@@ -258,7 +297,7 @@ def _main(argv=None):
             print(f"  {category}: {count}")
     if args.dry_run:
         print("Dry run rolled back the transaction; no rows were saved.")
-    return 0
+    return exit_code
 
 
 def main(argv=None):

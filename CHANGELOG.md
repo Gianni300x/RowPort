@@ -6,6 +6,9 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
+- Export versioned JSON completion summaries with `--summary-json`, including counts, duration and rejection categories without row values or connection details.
+- Return exit code 3 for completed imports or retries with rejected rows using `--fail-on-rejects`, preserving normal commit and dry-run behavior.
+
 - Run PostgreSQL integration tests on Linux and CLI unit tests on Windows with GitHub Actions.
 
 - Retry corrected rejection reports with `rowport retry`.
