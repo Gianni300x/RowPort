@@ -1,0 +1,28 @@
+# Separate project and temporary database; does not use the demo or local .env.
+name: rowport-benchmark
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: rowport
+      POSTGRES_PASSWORD: rowport-benchmark
+      POSTGRES_DB: rowport_benchmark
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rowport -d rowport_benchmark"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  benchmark:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ROWPORT_BENCHMARK_DSN: postgresql://rowport:rowport-benchmark@db:5432/rowport_benchmark
+    volumes:
+      - ./reports:/reports
+    entrypoint: ["python", "-m", "scripts.benchmark"]
+    command: ["--output", "/reports/benchmark.json"]

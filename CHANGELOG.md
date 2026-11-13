@@ -6,6 +6,9 @@ All notable changes to RowPort are documented in this file.
 
 ### Added
 
+- Add an isolated, reproducible benchmark for 100,000 and 1,000,000 synthetic rows with configurable rejection rates and repetitions, verified database/report counts, CLI duration and fresh-process peak RSS measurements.
+- Add a separate Docker Compose benchmark project and JSON results with environment versions and source hashes.
+
 - Export versioned JSON completion summaries with `--summary-json`, including counts, duration and rejection categories without row values or connection details.
 - Return exit code 3 for completed imports or retries with rejected rows using `--fail-on-rejects`, preserving normal commit and dry-run behavior.
 

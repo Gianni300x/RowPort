@@ -593,6 +593,69 @@ and the CLI and progress unit tests on Windows, using Python 3.10 and 3.14.
 The workflow runs for pushes, pull requests, and manual dispatches. Windows
 integration with PostgreSQL is not part of this workflow.
 
+## Performance benchmark
+
+With Docker running, use this separate benchmark project:
+
+```sh
+docker compose -f compose.benchmark.yaml up --build --exit-code-from benchmark --attach benchmark
+```
+
+It starts a temporary PostgreSQL database with no published ports, generates
+synthetic products and runs six sequential imports: **100,000 and 1,000,000
+rows**, each with **0%, 1% and 10%** invalid numeric prices. The CSV also includes
+Unicode, commas, quotes and multiline text. Each import starts with an empty
+table with a primary key, required columns and check constraints. The table
+schema is removed afterward; the temporary database is discarded when its
+container stops. This project does not use the demo database or your `.env`.
+
+The terminal shows elapsed seconds, processed rows per second and peak resident
+memory (RSS). Results are saved to **`reports/benchmark.json` on your computer**
+(`/reports/benchmark.json` inside the container). A run is marked verified only
+when the exit code, CLI summary, PostgreSQL row count and rejection report agree
+with the generated data. Every rejection is checked for the expected record ID
+and a nonempty error reason. Results include environment versions and source
+hashes for later comparisons. A failure returns a nonzero code and preserves
+an existing result file; check the process exit status before using that file.
+
+To select smaller datasets or repeat each case three times:
+
+```sh
+docker compose -f compose.benchmark.yaml run --build --rm benchmark --rows 100000 --reject-percent 0 1 10 --repeat 3 --output /reports/benchmark.json
+docker compose -f compose.benchmark.yaml down
+```
+
+Run `down` after either Docker command to remove the stopped containers and
+network. The `run` variant leaves the database running until `down`.
+
+For an existing **disposable** PostgreSQL database on macOS or Linux, activate
+the installed Python environment, create the output directory, and run:
+
+```sh
+mkdir -p reports
+ROWPORT_BENCHMARK_DSN="postgresql://your_user:your_password@localhost:5432/disposable_database" python -m scripts.benchmark
+```
+
+The benchmark deliberately requires `ROWPORT_BENCHMARK_DSN` and does not fall
+back to `DATABASE_URL` or `.env`. It creates a uniquely named `rowport_bench_…`
+schema and removes it on completion or handled failure. Force-killing the
+harness or losing the database connection can leave that schema behind. It
+never truncates tables outside its own schema. Use Docker on Windows for RSS
+measurement. `--timeout` sets the per-import timeout in seconds (default 1800).
+Requested rejection counts are rounded down to whole rows.
+
+**Measurement limits:** elapsed time covers CLI execution, including connection,
+commit and report publication; it excludes worker startup, data generation and
+verification. Peak RSS includes the Python runtime in a fresh worker for each
+import, excluding PostgreSQL and the benchmark harness. Output is noninteractive,
+so the terminal's preliminary counting pass is not measured. Runs do not reset
+OS or database caches. The default is one measurement per case; use `--repeat`
+and compare equivalent environments before drawing performance conclusions.
+Docker results depend on its CPU, RAM and temporary-database limits; allow disk
+and memory for the database, CSV and rejection report. These are observations
+for one workload, not a throughput guarantee or a measurement of remote-network
+latency, duplicates, foreign keys, triggers or additional indexes.
+
 ## Code structure
 
 - `scripts/cli.py` handles commands, arguments and console output.
@@ -601,6 +664,7 @@ integration with PostgreSQL is not part of this workflow.
 - `scripts/importer.py` validates the table, imports rows and manages reports.
 - `scripts/progress.py` renders the interactive progress bar.
 - `scripts/errors.py` defines errors shared by those modules.
+- `scripts/benchmark.py` generates synthetic workloads and verifies performance measurements.
 
 ## License
 
